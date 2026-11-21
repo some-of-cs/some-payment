@@ -5,6 +5,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::PaymentError;
 
+/// Scoped idempotency lock descriptor passed to [`IdempotencyStore`] operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdempotencyEntry<'a> {
+    /// Namespaced scope (e.g., `"tenant-1:moyasar:refund"`).
+    pub scope: &'a str,
+    /// Caller-supplied idempotency key.
+    pub key: &'a str,
+    /// Lock or cached-response TTL in seconds.
+    pub ttl_secs: u64,
+}
+
+impl<'a> IdempotencyEntry<'a> {
+    /// Creates a new [`IdempotencyEntry`].
+    pub const fn new(scope: &'a str, key: &'a str, ttl_secs: u64) -> Self {
+        Self {
+            scope,
+            key,
+            ttl_secs,
+        }
+    }
+}
+
 /// Atomic lock reservation outcome returned by [`IdempotencyStore::reserve`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReserveOutcome {
@@ -29,28 +51,22 @@ pub enum ReserveOutcome {
 /// # Examples
 ///
 /// ```
-/// use some_payment_core::ReserveOutcome;
+/// use some_payment_core::{IdempotencyEntry, ReserveOutcome};
 ///
-/// let outcome = ReserveOutcome::Acquired;
-/// assert_eq!(outcome, ReserveOutcome::Acquired);
+/// let entry = IdempotencyEntry::new("moyasar:refund", "key-1", 300);
+/// assert_eq!(entry.ttl_secs, 300);
+/// assert_eq!(ReserveOutcome::Acquired, ReserveOutcome::Acquired);
 /// ```
 #[async_trait]
 pub trait IdempotencyStore: Send + Sync {
-    /// Atomically attempts to acquire a lock for `(scope, key)` with a TTL in seconds.
-    async fn reserve(
-        &self,
-        scope: &str,
-        key: &str,
-        ttl_secs: u64,
-    ) -> Result<ReserveOutcome, PaymentError>;
+    /// Atomically attempts to acquire a lock for `entry`.
+    async fn reserve(&self, entry: &IdempotencyEntry<'_>) -> Result<ReserveOutcome, PaymentError>;
 
-    /// Marks `(scope, key)` as completed and caches the redacted serialized response.
+    /// Marks `entry` as completed and caches the redacted serialized response.
     async fn complete(
         &self,
-        scope: &str,
-        key: &str,
+        entry: &IdempotencyEntry<'_>,
         payload: &serde_json::Value,
-        ttl_secs: u64,
     ) -> Result<(), PaymentError>;
 
     /// Releases a lock strictly after a definitive pre-flight or 4xx rejection.
@@ -71,11 +87,9 @@ mod tests {
     impl IdempotencyStore for MockStore {
         async fn reserve(
             &self,
-            _scope: &str,
-            key: &str,
-            _ttl_secs: u64,
+            entry: &IdempotencyEntry<'_>,
         ) -> Result<ReserveOutcome, PaymentError> {
-            match key {
+            match entry.key {
                 "done" => Ok(ReserveOutcome::Completed(serde_json::json!({"ok": true}))),
                 "busy" => Ok(ReserveOutcome::InProgress),
                 _ => Ok(ReserveOutcome::Acquired),
@@ -84,10 +98,8 @@ mod tests {
 
         async fn complete(
             &self,
-            _scope: &str,
-            _key: &str,
+            _entry: &IdempotencyEntry<'_>,
             _payload: &serde_json::Value,
-            _ttl_secs: u64,
         ) -> Result<(), PaymentError> {
             Ok(())
         }
@@ -100,16 +112,20 @@ mod tests {
     #[tokio::test]
     async fn trait_is_object_safe_across_all_outcomes() {
         let store: Arc<dyn IdempotencyStore> = Arc::new(MockStore);
+        let new_entry = IdempotencyEntry::new("refund", "new", 60);
+        let busy_entry = IdempotencyEntry::new("refund", "busy", 60);
+        let done_entry = IdempotencyEntry::new("refund", "done", 60);
+
         assert_eq!(
-            store.reserve("refund", "new", 60).await.unwrap(),
+            store.reserve(&new_entry).await.unwrap(),
             ReserveOutcome::Acquired
         );
         assert_eq!(
-            store.reserve("refund", "busy", 60).await.unwrap(),
+            store.reserve(&busy_entry).await.unwrap(),
             ReserveOutcome::InProgress
         );
         assert!(matches!(
-            store.reserve("refund", "done", 60).await.unwrap(),
+            store.reserve(&done_entry).await.unwrap(),
             ReserveOutcome::Completed(_)
         ));
     }

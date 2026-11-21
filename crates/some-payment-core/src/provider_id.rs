@@ -128,9 +128,9 @@ mod tests {
 
     #[test]
     fn serde_validates_on_deserialize() {
-        let ok: ProviderId = serde_json::from_str(""Moyasar"").unwrap();
+        let ok: ProviderId = serde_json::from_str(r#""Moyasar""#).unwrap();
         assert_eq!(ok.as_str(), "moyasar");
-        let err: Result<ProviderId, _> = serde_json::from_str(""../evil"");
+        let err: Result<ProviderId, _> = serde_json::from_str(r#""../evil""#);
         assert!(err.is_err());
     }
 }

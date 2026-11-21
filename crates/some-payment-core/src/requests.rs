@@ -190,6 +190,19 @@ pub struct RefundRequest {
     pub idempotency_key: Option<String>,
 }
 
+fn validate_metadata_entry(key: &str, value: &str) -> Result<(), PaymentError> {
+    if key.is_empty() {
+        return Err(PaymentError::validation("metadata key must not be empty"));
+    }
+    if key.len() > MAX_METADATA_KEY_LEN {
+        return Err(PaymentError::validation("metadata key exceeds 40 bytes"));
+    }
+    if value.len() > MAX_METADATA_VALUE_LEN {
+        return Err(PaymentError::validation("metadata value exceeds 500 bytes"));
+    }
+    Ok(())
+}
+
 fn validate_metadata(metadata: &BTreeMap<String, String>) -> Result<(), PaymentError> {
     if metadata.len() > MAX_METADATA_ENTRIES {
         return Err(PaymentError::validation(
@@ -197,11 +210,7 @@ fn validate_metadata(metadata: &BTreeMap<String, String>) -> Result<(), PaymentE
         ));
     }
     for (k, v) in metadata {
-        if k.is_empty() || k.len() > MAX_METADATA_KEY_LEN || v.len() > MAX_METADATA_VALUE_LEN {
-            return Err(PaymentError::validation(
-                "metadata key must be 1..=40 bytes and value <= 500 bytes",
-            ));
-        }
+        validate_metadata_entry(k, v)?;
     }
     Ok(())
 }

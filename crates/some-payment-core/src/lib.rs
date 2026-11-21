@@ -21,7 +21,7 @@ pub mod results;
 
 pub use capabilities::PaymentCapabilities;
 pub use error::{ErrorKind, PaymentError};
-pub use idempotency::{IdempotencyStore, ReserveOutcome};
+pub use idempotency::{IdempotencyEntry, IdempotencyStore, ReserveOutcome};
 pub use money::{CurrencyCode, MinorUnitScale, Money};
 pub use provider::PaymentProvider;
 pub use provider_id::ProviderId;
