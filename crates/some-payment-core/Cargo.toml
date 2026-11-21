@@ -1,0 +1,23 @@
+[package]
+name = "some-payment-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "HTTP-free domain primitives, capabilities, PaymentProvider SPI, and IdempotencyStore contracts for some-payment."
+keywords = ["payments", "fintech", "stripe", "moyasar", "paymob"]
+categories = ["finance", "api-bindings"]
+
+[dependencies]
+async-trait = "0.1"
+bitflags = { version = "2.9", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+zeroize = { version = "1.8", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1.44", features = ["macros", "rt"] }

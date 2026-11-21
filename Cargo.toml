@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/some-payment-core",
+]
+exclude = [".worktrees"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Maher Aladdin", "Some(CS)"]
+license = "Apache-2.0"
+repository = "https://github.com/some-of-cs/some-payment"
+homepage = "https://github.com/some-of-cs/some-payment"
