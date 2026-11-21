@@ -46,7 +46,10 @@ const KNOWN_ERROR_KINDS: &[(&str, ErrorKind)] = &[
     ("authentication", ErrorKind::Authentication),
     ("rate_limited", ErrorKind::RateLimited),
     ("provider_unavailable", ErrorKind::ProviderUnavailable),
-    ("webhook_verification_failed", ErrorKind::WebhookVerificationFailed),
+    (
+        "webhook_verification_failed",
+        ErrorKind::WebhookVerificationFailed,
+    ),
     ("idempotency_conflict", ErrorKind::IdempotencyConflict),
     ("aborted_by_hook", ErrorKind::AbortedByHook),
     ("provider", ErrorKind::Provider),
