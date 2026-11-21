@@ -173,12 +173,16 @@ mod tests {
         let decoded: ProviderReference = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, reference);
 
-        assert!(ProviderReference::builder(ProviderId::new("stripe"))
-            .build()
-            .is_err());
-        assert!(ProviderReference::builder(ProviderId::new("stripe"))
-            .payment_id("x".repeat(256))
-            .build()
-            .is_err());
+        assert!(
+            ProviderReference::builder(ProviderId::new("stripe"))
+                .build()
+                .is_err()
+        );
+        assert!(
+            ProviderReference::builder(ProviderId::new("stripe"))
+                .payment_id("x".repeat(256))
+                .build()
+                .is_err()
+        );
     }
 }
