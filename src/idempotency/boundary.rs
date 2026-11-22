@@ -1,5 +1,5 @@
 //! Generic async idempotent mutation execution boundary enforcing 4xx-only
-//! lock release and 5xx/timeout lock retention.
+//! lock release, 5xx/timeout lock retention, and secret-redacted caching.
 
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -7,12 +7,77 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::{Map, Value};
 use some_payment_core::{
     IdempotencyEntry, IdempotencyStore, PaymentCapabilities, PaymentError, ReserveOutcome,
 };
 
 /// Default lock and cached-response TTL in seconds (`5` minutes).
 pub const DEFAULT_LOCK_TTL_SECS: u64 = 300;
+
+const REDACTED_SENTINEL: &str = "[REDACTED]";
+const MAX_REDACTION_DEPTH: usize = 32;
+
+const SENSITIVE_KEYS: &[&str] = &[
+    "client_secret",
+    "secret_token",
+    "api_key",
+    "secret_key",
+    "webhook_secret",
+    "hmac_secret",
+    "private_key",
+];
+
+/// Scoped execution parameters for [`IdempotencyBoundary::execute_idempotent_mutation`].
+///
+/// Implements a manual [`fmt::Debug`] that redacts `key` as `"[REDACTED]"` so
+/// raw idempotency keys never leak into diagnostic logs.
+///
+/// # Examples
+///
+/// ```
+/// use some_payment::idempotency::boundary::MutationContext;
+/// use some_payment_core::PaymentCapabilities;
+///
+/// let ctx = MutationContext::new(
+///     "tenant-1:moyasar:refund",
+///     "ref-001",
+///     PaymentCapabilities::REFUND,
+/// );
+/// assert_eq!(ctx.scope, "tenant-1:moyasar:refund");
+/// assert!(format!("{ctx:?}").contains("[REDACTED]"));
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct MutationContext<'a> {
+    /// Namespaced idempotency scope (e.g., `"tenant-1:moyasar:refund"`).
+    pub scope: &'a str,
+    /// Caller-supplied idempotency key.
+    pub key: &'a str,
+    /// Gateway capability flags governing native idempotency bypass.
+    pub capabilities: PaymentCapabilities,
+}
+
+impl<'a> MutationContext<'a> {
+    /// Creates a new [`MutationContext`].
+    #[must_use]
+    pub const fn new(scope: &'a str, key: &'a str, capabilities: PaymentCapabilities) -> Self {
+        Self {
+            scope,
+            key,
+            capabilities,
+        }
+    }
+}
+
+impl fmt::Debug for MutationContext<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MutationContext")
+            .field("scope", &self.scope)
+            .field("key", &REDACTED_SENTINEL)
+            .field("capabilities", &self.capabilities)
+            .finish()
+    }
+}
 
 /// Provider-agnostic async execution boundary wrapping non-idempotent payment
 /// mutations with a distributed [`IdempotencyStore`].
@@ -28,7 +93,11 @@ pub const DEFAULT_LOCK_TTL_SECS: u64 = 300;
 /// - [`ReserveOutcome::InProgress`] returns
 ///   [`PaymentError::IdempotencyConflict`] with zero outbound provider calls.
 /// - [`ReserveOutcome::Acquired`] executes the mutation and:
-///   - calls [`IdempotencyStore::complete`] on `Ok`,
+///   - recursively redacts sensitive keys (`client_secret`, `secret_token`,
+///     `api_key`, `secret_key`, `webhook_secret`, `hmac_secret`, `private_key`)
+///     to `"[REDACTED]"` in the cached JSON before calling
+///     [`IdempotencyStore::complete`], while returning the live unredacted `T`
+///     to the caller,
 ///   - calls [`IdempotencyStore::release`] **only** when
 ///     [`PaymentError::is_definitive_client_rejection`] returns `true` (local
 ///     validation or definitive 4xx rejection),
@@ -41,7 +110,9 @@ pub const DEFAULT_LOCK_TTL_SECS: u64 = 300;
 /// use std::sync::Arc;
 ///
 /// use async_trait::async_trait;
-/// use some_payment::idempotency::boundary::{DEFAULT_LOCK_TTL_SECS, IdempotencyBoundary};
+/// use some_payment::idempotency::boundary::{
+///     DEFAULT_LOCK_TTL_SECS, IdempotencyBoundary, MutationContext,
+/// };
 /// use some_payment_core::{
 ///     IdempotencyEntry, IdempotencyStore, PaymentCapabilities, PaymentError, ReserveOutcome,
 /// };
@@ -71,13 +142,15 @@ pub const DEFAULT_LOCK_TTL_SECS: u64 = 300;
 /// }
 ///
 /// let boundary = IdempotencyBoundary::new(Arc::new(AlwaysAcquireStore), DEFAULT_LOCK_TTL_SECS)?;
-/// let rt = tokio::runtime::Builder::new_current_thread().build()?;
-/// let result: String = rt.block_on(boundary.execute_idempotent_mutation(
+/// let ctx = MutationContext::new(
 ///     "tenant-1:moyasar:refund",
 ///     "ref-001",
 ///     PaymentCapabilities::REFUND,
-///     || async { Ok("refunded".to_owned()) },
-/// ))?;
+/// );
+/// let rt = tokio::runtime::Builder::new_current_thread().build()?;
+/// let result: String = rt.block_on(boundary.execute_idempotent_mutation(&ctx, || async {
+///     Ok("refunded".to_owned())
+/// }))?;
 /// assert_eq!(result, "refunded");
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -131,17 +204,17 @@ impl IdempotencyBoundary {
     ///
     /// # Errors
     ///
-    /// - [`PaymentError::ValidationError`] if `scope` or `key` is empty or
-    ///   whitespace-only, or if payload serialization/deserialization fails.
+    /// - [`PaymentError::ValidationError`] if `ctx.scope` or `ctx.key` is empty
+    ///   or whitespace-only.
+    /// - [`PaymentError::ConfigurationError`] if post-mutation serialization,
+    ///   secret redaction depth bounds, or cached payload deserialization fails.
     /// - [`PaymentError::IdempotencyConflict`] if another worker currently
     ///   holds the lock (`ReserveOutcome::InProgress`).
     /// - Any [`PaymentError`] returned by the underlying [`IdempotencyStore`]
     ///   or `mutation` closure.
     pub async fn execute_idempotent_mutation<T, F, Fut>(
         &self,
-        scope: &str,
-        key: &str,
-        capabilities: PaymentCapabilities,
+        ctx: &MutationContext<'_>,
         mutation: F,
     ) -> Result<T, PaymentError>
     where
@@ -149,15 +222,18 @@ impl IdempotencyBoundary {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, PaymentError>>,
     {
-        validate_inputs(scope, key)?;
-        if capabilities.contains(PaymentCapabilities::NATIVE_MUTATION_IDEMPOTENCY) {
+        validate_inputs(ctx.scope, ctx.key)?;
+        if ctx
+            .capabilities
+            .contains(PaymentCapabilities::NATIVE_MUTATION_IDEMPOTENCY)
+        {
             return mutation().await;
         }
-        let entry = IdempotencyEntry::new(scope, key, self.ttl_secs);
+        let entry = IdempotencyEntry::new(ctx.scope, ctx.key, self.ttl_secs);
         match self.store.reserve(&entry).await? {
             ReserveOutcome::Completed(cached) => deserialize_cached(cached),
             ReserveOutcome::InProgress => Err(PaymentError::IdempotencyConflict {
-                scope: scope.to_owned(),
+                scope: ctx.scope.to_owned(),
             }),
             ReserveOutcome::Acquired => self.handle_acquired(&entry, mutation).await,
         }
@@ -184,7 +260,8 @@ impl IdempotencyBoundary {
         entry: &IdempotencyEntry<'_>,
         result: T,
     ) -> Result<T, PaymentError> {
-        let payload = serialize_payload(&result)?;
+        let mut payload = serialize_payload(&result)?;
+        scrub_sensitive_json(&mut payload, 0)?;
         self.store.complete(entry, &payload).await?;
         Ok(result)
     }
@@ -240,14 +317,55 @@ fn validate_inputs(scope: &str, key: &str) -> Result<(), PaymentError> {
     Ok(())
 }
 
-fn serialize_payload<T: Serialize>(value: &T) -> Result<serde_json::Value, PaymentError> {
-    let err = |_| PaymentError::validation("failed to serialize idempotency payload");
+fn serialize_payload<T: Serialize>(value: &T) -> Result<Value, PaymentError> {
+    let err = |_| PaymentError::configuration("failed to serialize idempotent mutation result");
     serde_json::to_value(value).map_err(err)
 }
 
-fn deserialize_cached<T: DeserializeOwned>(value: serde_json::Value) -> Result<T, PaymentError> {
-    let err = |_| PaymentError::validation("failed to deserialize cached idempotency payload");
+fn deserialize_cached<T: DeserializeOwned>(value: Value) -> Result<T, PaymentError> {
+    let err = |_| PaymentError::configuration("failed to deserialize cached idempotency payload");
     serde_json::from_value(value).map_err(err)
+}
+
+fn scrub_sensitive_json(value: &mut Value, depth: usize) -> Result<(), PaymentError> {
+    if depth > MAX_REDACTION_DEPTH {
+        return Err(PaymentError::configuration(
+            "idempotency payload exceeds maximum JSON nesting depth",
+        ));
+    }
+    match value {
+        Value::Object(map) => scrub_json_object(map, depth),
+        Value::Array(items) => scrub_json_array(items, depth),
+        _ => Ok(()),
+    }
+}
+
+fn scrub_json_object(map: &mut Map<String, Value>, depth: usize) -> Result<(), PaymentError> {
+    for (key, val) in map.iter_mut() {
+        scrub_object_entry(key, val, depth)?;
+    }
+    Ok(())
+}
+
+fn scrub_object_entry(key: &str, val: &mut Value, depth: usize) -> Result<(), PaymentError> {
+    if is_sensitive_key(key) && !val.is_null() {
+        *val = Value::String(REDACTED_SENTINEL.to_owned());
+        return Ok(());
+    }
+    scrub_sensitive_json(val, depth + 1)
+}
+
+fn scrub_json_array(items: &mut [Value], depth: usize) -> Result<(), PaymentError> {
+    for item in items {
+        scrub_sensitive_json(item, depth + 1)?;
+    }
+    Ok(())
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    SENSITIVE_KEYS
+        .iter()
+        .any(|sensitive| key.eq_ignore_ascii_case(sensitive))
 }
 
 fn fingerprint_key(scope: &str, key: &str) -> String {
@@ -265,7 +383,9 @@ mod tests {
 
     use async_trait::async_trait;
     use serde::Deserialize;
-    use some_payment_core::{ErrorKind, ProviderId};
+    use some_payment_core::{
+        ErrorKind, Money, NextAction, PaymentResult, PaymentStatus, ProviderId, ProviderReference,
+    };
 
     use super::*;
 
@@ -275,13 +395,28 @@ mod tests {
         amount: i64,
     }
 
+    #[derive(Debug)]
+    struct FailingSerialize;
+
+    impl Serialize for FailingSerialize {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("intentional serialization fault"))
+        }
+    }
+
+    impl<'de> Deserialize<'de> for FailingSerialize {
+        fn deserialize<D: serde::Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
+            Ok(Self)
+        }
+    }
+
     struct MockStore {
         outcome: ReserveOutcome,
         fail_release: bool,
         reserve_calls: AtomicUsize,
         complete_calls: AtomicUsize,
         release_calls: AtomicUsize,
-        last_completed: Mutex<Option<serde_json::Value>>,
+        last_completed: Mutex<Option<Value>>,
     }
 
     impl MockStore {
@@ -302,6 +437,14 @@ mod tests {
                 ..Self::new(outcome)
             }
         }
+
+        fn counts(&self) -> (usize, usize, usize) {
+            (
+                self.reserve_calls.load(Ordering::SeqCst),
+                self.complete_calls.load(Ordering::SeqCst),
+                self.release_calls.load(Ordering::SeqCst),
+            )
+        }
     }
 
     #[async_trait]
@@ -317,7 +460,7 @@ mod tests {
         async fn complete(
             &self,
             _entry: &IdempotencyEntry<'_>,
-            payload: &serde_json::Value,
+            payload: &Value,
         ) -> Result<(), PaymentError> {
             self.complete_calls.fetch_add(1, Ordering::SeqCst);
             *self.last_completed.lock().unwrap() = Some(payload.clone());
@@ -347,8 +490,21 @@ mod tests {
         let boundary = IdempotencyBoundary::with_default_ttl(store);
         assert_eq!(boundary.ttl_secs(), DEFAULT_LOCK_TTL_SECS);
         let debug_repr = format!("{boundary:?}");
-        assert!(debug_repr.contains("IdempotencyBoundary"));
-        assert!(debug_repr.contains("<IdempotencyStore>"));
+        assert!(
+            debug_repr.contains("IdempotencyBoundary") && debug_repr.contains("<IdempotencyStore>")
+        );
+    }
+
+    #[test]
+    fn mutation_context_debug_redacts_raw_key() {
+        let ctx = MutationContext::new(
+            "tenant-1:moyasar:refund",
+            "secret-idemp-key-999",
+            PaymentCapabilities::REFUND,
+        );
+        let dbg = format!("{ctx:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("secret-idemp-key-999"));
     }
 
     #[tokio::test]
@@ -357,9 +513,10 @@ mod tests {
         let boundary = IdempotencyBoundary::with_default_ttl(store.clone());
         let provider_calls = AtomicUsize::new(0);
 
-        for (scope, key) in [("", "k1"), ("   ", "k1"), ("s1", ""), ("s1", "  	 ")] {
+        for (scope, key) in [("", "k1"), ("   ", "k1"), ("s1", ""), ("s1", "  \t ")] {
+            let ctx = MutationContext::new(scope, key, PaymentCapabilities::REFUND);
             let err = boundary
-                .execute_idempotent_mutation(scope, key, PaymentCapabilities::REFUND, || async {
+                .execute_idempotent_mutation(&ctx, || async {
                     provider_calls.fetch_add(1, Ordering::SeqCst);
                     Ok::<_, PaymentError>(MockReceipt {
                         id: "r1".to_owned(),
@@ -371,8 +528,10 @@ mod tests {
             assert_eq!(err.kind(), ErrorKind::Validation);
         }
 
-        assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.reserve_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            (provider_calls.load(Ordering::SeqCst), store.counts()),
+            (0, (0, 0, 0))
+        );
     }
 
     #[tokio::test]
@@ -384,25 +543,25 @@ mod tests {
             id: "rf_native".to_owned(),
             amount: 2500,
         };
+        let ctx = MutationContext::new(
+            "tenant-1:stripe:refund",
+            "key-native",
+            PaymentCapabilities::REFUND | PaymentCapabilities::NATIVE_MUTATION_IDEMPOTENCY,
+        );
 
         let result = boundary
-            .execute_idempotent_mutation(
-                "tenant-1:stripe:refund",
-                "key-native",
-                PaymentCapabilities::REFUND | PaymentCapabilities::NATIVE_MUTATION_IDEMPOTENCY,
-                || async {
-                    provider_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(expected.clone())
-                },
-            )
+            .execute_idempotent_mutation(&ctx, || async {
+                provider_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(expected.clone())
+            })
             .await
             .unwrap();
 
         assert_eq!(result, expected);
-        assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store.reserve_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.complete_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.release_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            (provider_calls.load(Ordering::SeqCst), store.counts()),
+            (1, (0, 0, 0))
+        );
     }
 
     #[tokio::test]
@@ -416,28 +575,28 @@ mod tests {
         )));
         let boundary = IdempotencyBoundary::with_default_ttl(store.clone());
         let provider_calls = AtomicUsize::new(0);
+        let ctx = MutationContext::new(
+            "tenant-1:moyasar:refund",
+            "refund:ord-1",
+            PaymentCapabilities::REFUND,
+        );
 
         let result: MockReceipt = boundary
-            .execute_idempotent_mutation(
-                "tenant-1:moyasar:refund",
-                "refund:ord-1",
-                PaymentCapabilities::REFUND,
-                || async {
-                    provider_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(MockReceipt {
-                        id: "should_not_run".to_owned(),
-                        amount: 0,
-                    })
-                },
-            )
+            .execute_idempotent_mutation(&ctx, || async {
+                provider_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(MockReceipt {
+                    id: "should_not_run".to_owned(),
+                    amount: 0,
+                })
+            })
             .await
             .unwrap();
 
         assert_eq!(result, cached);
-        assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.reserve_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store.complete_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.release_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            (provider_calls.load(Ordering::SeqCst), store.counts()),
+            (0, (1, 0, 0))
+        );
     }
 
     #[tokio::test]
@@ -445,20 +604,20 @@ mod tests {
         let store = Arc::new(MockStore::new(ReserveOutcome::InProgress));
         let boundary = IdempotencyBoundary::with_default_ttl(store.clone());
         let provider_calls = AtomicUsize::new(0);
+        let ctx = MutationContext::new(
+            "tenant-1:moyasar:refund",
+            "refund:ord-1",
+            PaymentCapabilities::REFUND,
+        );
 
         let err = boundary
-            .execute_idempotent_mutation(
-                "tenant-1:moyasar:refund",
-                "refund:ord-1",
-                PaymentCapabilities::REFUND,
-                || async {
-                    provider_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok::<_, PaymentError>(MockReceipt {
-                        id: "never".to_owned(),
-                        amount: 0,
-                    })
-                },
-            )
+            .execute_idempotent_mutation(&ctx, || async {
+                provider_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, PaymentError>(MockReceipt {
+                    id: "never".to_owned(),
+                    amount: 0,
+                })
+            })
             .await
             .unwrap_err();
 
@@ -466,10 +625,10 @@ mod tests {
             err,
             PaymentError::IdempotencyConflict { ref scope } if scope == "tenant-1:moyasar:refund"
         ));
-        assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.reserve_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store.complete_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.release_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            (provider_calls.load(Ordering::SeqCst), store.counts()),
+            (0, (1, 0, 0))
+        );
     }
 
     #[tokio::test]
@@ -480,23 +639,86 @@ mod tests {
             id: "rf_ok".to_owned(),
             amount: 7500,
         };
+        let ctx = MutationContext::new(
+            "tenant-1:paymob:capture",
+            "cap:ord-2",
+            PaymentCapabilities::AUTH_CAPTURE,
+        );
 
         let result = boundary
-            .execute_idempotent_mutation(
-                "tenant-1:paymob:capture",
-                "cap:ord-2",
-                PaymentCapabilities::AUTH_CAPTURE,
-                || async { Ok(expected.clone()) },
-            )
+            .execute_idempotent_mutation(&ctx, || async { Ok(expected.clone()) })
             .await
             .unwrap();
 
         assert_eq!(result, expected);
-        assert_eq!(store.reserve_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store.complete_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store.release_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.counts(), (1, 1, 0));
         let saved = store.last_completed.lock().unwrap().clone().unwrap();
         assert_eq!(saved, serde_json::to_value(&expected).unwrap());
+    }
+
+    #[tokio::test]
+    async fn tm4_embedded_client_secret_redacted_in_store_but_returned_live() {
+        let store = Arc::new(MockStore::new(ReserveOutcome::Acquired));
+        let boundary = IdempotencyBoundary::with_default_ttl(store.clone());
+        let reference = ProviderReference::builder(ProviderId::new("moyasar"))
+            .payment_id("pay_live_1")
+            .build()
+            .unwrap();
+        let live_payment = PaymentResult {
+            reference,
+            status: PaymentStatus::RequiresAction,
+            money: Money::new(5_000, "SAR").unwrap(),
+            captured_amount: None,
+            refunded_amount: None,
+            next_action: Some(NextAction::EmbeddedClientSecret {
+                client_secret: "pi_secret_live_CANARY_777".to_owned(),
+            }),
+            checkout_url: None,
+            livemode: false,
+        };
+        let ctx = MutationContext::new(
+            "tenant-1:moyasar:create",
+            "ord-secret-1",
+            PaymentCapabilities::empty(),
+        );
+
+        let returned = boundary
+            .execute_idempotent_mutation(&ctx, || async { Ok(live_payment.clone()) })
+            .await
+            .unwrap();
+
+        assert_eq!(returned, live_payment);
+        let cached_str = store
+            .last_completed
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap()
+            .to_string();
+        assert!(
+            cached_str.contains("[REDACTED]") && !cached_str.contains("pi_secret_live_CANARY_777")
+        );
+    }
+
+    #[tokio::test]
+    async fn serialization_failure_returns_configuration_error_not_validation() {
+        let store = Arc::new(MockStore::new(ReserveOutcome::Acquired));
+        let boundary = IdempotencyBoundary::with_default_ttl(store.clone());
+        let ctx = MutationContext::new(
+            "tenant-1:moyasar:refund",
+            "ref:ser-err",
+            PaymentCapabilities::REFUND,
+        );
+
+        let err = boundary
+            .execute_idempotent_mutation::<FailingSerialize, _, _>(&ctx, || async {
+                Ok(FailingSerialize)
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Configuration);
+        assert_eq!(store.counts(), (1, 0, 0));
     }
 
     #[tokio::test]
@@ -515,20 +737,20 @@ mod tests {
             let expected_kind = expected_err.kind();
             let store = Arc::new(MockStore::new(ReserveOutcome::Acquired));
             let boundary = IdempotencyBoundary::with_default_ttl(store.clone());
+            let ctx = MutationContext::new(
+                "tenant-1:paymob:capture",
+                "cap:ord-3",
+                PaymentCapabilities::AUTH_CAPTURE,
+            );
 
             let err = boundary
-                .execute_idempotent_mutation::<MockReceipt, _, _>(
-                    "tenant-1:paymob:capture",
-                    "cap:ord-3",
-                    PaymentCapabilities::AUTH_CAPTURE,
-                    || async { Err(expected_err) },
-                )
+                .execute_idempotent_mutation::<MockReceipt, _, _>(&ctx, || async {
+                    Err(expected_err)
+                })
                 .await
                 .unwrap_err();
 
-            assert_eq!(err.kind(), expected_kind);
-            assert_eq!(store.complete_calls.load(Ordering::SeqCst), 0);
-            assert_eq!(store.release_calls.load(Ordering::SeqCst), 1);
+            assert_eq!((err.kind(), store.counts()), (expected_kind, (1, 0, 1)));
         }
     }
 
@@ -536,19 +758,23 @@ mod tests {
     async fn acquired_release_failure_still_returns_original_client_error() {
         let store = Arc::new(MockStore::with_failing_release(ReserveOutcome::Acquired));
         let boundary = IdempotencyBoundary::with_default_ttl(store.clone());
+        let ctx = MutationContext::new(
+            "tenant-1:paymob:capture",
+            "cap:ord-4",
+            PaymentCapabilities::AUTH_CAPTURE,
+        );
 
         let err = boundary
-            .execute_idempotent_mutation::<MockReceipt, _, _>(
-                "tenant-1:paymob:capture",
-                "cap:ord-4",
-                PaymentCapabilities::AUTH_CAPTURE,
-                || async { Err(PaymentError::validation("invalid amount")) },
-            )
+            .execute_idempotent_mutation::<MockReceipt, _, _>(&ctx, || async {
+                Err(PaymentError::validation("invalid amount"))
+            })
             .await
             .unwrap_err();
 
-        assert_eq!(err.kind(), ErrorKind::Validation);
-        assert_eq!(store.release_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            (err.kind(), store.counts()),
+            (ErrorKind::Validation, (1, 0, 1))
+        );
     }
 
     #[tokio::test]
@@ -576,36 +802,41 @@ mod tests {
             let expected_kind = expected_err.kind();
             let store = Arc::new(MockStore::new(ReserveOutcome::Acquired));
             let boundary = IdempotencyBoundary::with_default_ttl(store.clone());
+            let ctx = MutationContext::new(
+                "tenant-1:moyasar:refund",
+                "ref:ord-5",
+                PaymentCapabilities::REFUND,
+            );
 
             let err = boundary
-                .execute_idempotent_mutation::<MockReceipt, _, _>(
-                    "tenant-1:moyasar:refund",
-                    "ref:ord-5",
-                    PaymentCapabilities::REFUND,
-                    || async { Err(expected_err) },
-                )
+                .execute_idempotent_mutation::<MockReceipt, _, _>(&ctx, || async {
+                    Err(expected_err)
+                })
                 .await
                 .unwrap_err();
 
-            assert_eq!(err.kind(), expected_kind);
-            assert_eq!(store.complete_calls.load(Ordering::SeqCst), 0);
-            assert_eq!(store.release_calls.load(Ordering::SeqCst), 0);
+            assert_eq!((err.kind(), store.counts()), (expected_kind, (1, 0, 0)));
         }
     }
 
     #[test]
-    fn fingerprint_key_is_deterministic_and_does_not_leak_raw_key() {
+    fn fingerprint_key_is_deterministic_and_non_secret() {
         let fp1 = fingerprint_key("tenant-1:moyasar:refund", "secret-key-123");
         let fp2 = fingerprint_key("tenant-1:moyasar:refund", "secret-key-123");
-        let fp3 = fingerprint_key("tenant-1:moyasar:refund", "secret-key-124");
+
+        assert_eq!(fp1, fp2);
+        assert!(fp1.len() == 16 && fp1.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!fp1.contains("secret-key-123"));
+    }
+
+    #[test]
+    fn fingerprint_key_separates_scope_and_key_boundaries() {
+        let fp_base = fingerprint_key("tenant-1:moyasar:refund", "secret-key-123");
+        let fp_other = fingerprint_key("tenant-1:moyasar:refund", "secret-key-124");
         let fp_ab_c = fingerprint_key("scope-ab", "c");
         let fp_a_bc = fingerprint_key("scope-a", "bc");
 
-        assert_eq!(fp1, fp2);
-        assert_eq!(fp1.len(), 16);
-        assert!(fp1.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(!fp1.contains("secret-key-123"));
-        assert_ne!(fp1, fp3);
+        assert_ne!(fp_base, fp_other);
         assert_ne!(fp_ab_c, fp_a_bc);
     }
 }

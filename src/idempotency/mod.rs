@@ -7,7 +7,7 @@ pub mod memory_store;
 pub mod reconciliation;
 pub mod scope_keys;
 
-pub use boundary::{DEFAULT_LOCK_TTL_SECS, IdempotencyBoundary};
+pub use boundary::{DEFAULT_LOCK_TTL_SECS, IdempotencyBoundary, MutationContext};
 pub use memory_store::{DEFAULT_MAX_CAPACITY, InMemoryIdempotencyStore};
 pub use reconciliation::{
     ReconciliationKind, ReconciliationOutcome, ReconciliationRequest,

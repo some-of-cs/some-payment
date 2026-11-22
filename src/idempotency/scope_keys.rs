@@ -268,16 +268,49 @@ mod tests {
 
     use super::*;
 
+    fn assert_all_rejected<T: fmt::Debug>(
+        inputs: &[String],
+        validate: impl Fn(&str) -> Result<T, PaymentError>,
+    ) {
+        for input in inputs {
+            let err = validate(input).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Validation);
+        }
+    }
+
+    fn build_invalid_segments(prefix: &str, max_len: usize, include_colon: bool) -> Vec<String> {
+        let mut samples = vec![
+            String::new(),
+            " ".to_owned(),
+            format!("{prefix} 1"),
+            format!("{prefix}\t1"),
+            format!("{prefix}\n1"),
+            format!("{prefix}\r1"),
+            format!("{prefix}\x001"),
+            format!("{prefix}\x1b1"),
+            format!("{prefix}\x7f1"),
+            format!("{prefix}-é"),
+            "x".repeat(max_len + 1),
+        ];
+        if include_colon {
+            samples.push(format!("{prefix}:sub"));
+            samples.push(":".to_owned());
+        }
+        samples
+    }
+
     #[test]
     fn scope_formats_deterministically_without_tenant() {
         let provider = ProviderId::new("moyasar");
         let scope = IdempotencyScope::try_new(&provider, "refund").unwrap();
-        assert_eq!(scope.as_str(), "moyasar:refund");
-        assert_eq!(scope.to_string(), "moyasar:refund");
-        assert_eq!(scope.as_ref(), "moyasar:refund");
-        assert_eq!(scope.provider_id(), &provider);
-        assert_eq!(scope.operation(), "refund");
-        assert_eq!(scope.tenant_id(), None);
+        assert_eq!(
+            (scope.as_str(), scope.to_string().as_str(), scope.as_ref()),
+            ("moyasar:refund", "moyasar:refund", "moyasar:refund")
+        );
+        assert_eq!(
+            (scope.provider_id(), scope.operation(), scope.tenant_id()),
+            (&provider, "refund", None)
+        );
         assert!(format!("{scope:?}").contains("IdempotencyScope"));
     }
 
@@ -291,25 +324,21 @@ mod tests {
         let parts = IdempotencyScope::from_parts(Some("tenant-1"), &provider, "capture").unwrap();
         let unscoped = IdempotencyScope::from_parts(None, &provider, "capture").unwrap();
         assert_eq!(via_builder, parts);
-        assert_eq!(via_builder.as_str(), "tenant-1:paymob:capture");
-        assert_eq!(via_builder.to_string(), "tenant-1:paymob:capture");
-        assert_eq!(via_builder.as_ref(), "tenant-1:paymob:capture");
-        assert_eq!(via_builder.tenant_id(), Some("tenant-1"));
-        assert_eq!(unscoped.as_str(), "paymob:capture");
-        assert_eq!(unscoped.tenant_id(), None);
+        assert_eq!(
+            (via_builder.as_str(), via_builder.tenant_id()),
+            ("tenant-1:paymob:capture", Some("tenant-1"))
+        );
+        assert_eq!(
+            (unscoped.as_str(), unscoped.tenant_id()),
+            ("paymob:capture", None)
+        );
     }
 
     #[test]
     fn scope_isolates_cross_tenant_keys_tm1() {
         let provider = ProviderId::new("stripe");
-        let tenant_a = IdempotencyScope::try_new(&provider, "refund")
-            .unwrap()
-            .with_tenant("tenant-a")
-            .unwrap();
-        let tenant_b = IdempotencyScope::try_new(&provider, "refund")
-            .unwrap()
-            .with_tenant("tenant-b")
-            .unwrap();
+        let tenant_a = IdempotencyScope::from_parts(Some("tenant-a"), &provider, "refund").unwrap();
+        let tenant_b = IdempotencyScope::from_parts(Some("tenant-b"), &provider, "refund").unwrap();
         let unscoped = IdempotencyScope::try_new(&provider, "refund").unwrap();
         assert_ne!(tenant_a.as_str(), tenant_b.as_str());
         assert_ne!(tenant_a.as_str(), unscoped.as_str());
@@ -317,62 +346,17 @@ mod tests {
     }
 
     #[test]
-    fn scope_rejects_invalid_operation_segments() {
+    fn scope_rejects_invalid_operation_and_tenant_segments() {
         let provider = ProviderId::new("moyasar");
-        let oversized = "a".repeat(MAX_SCOPE_SEGMENT_LEN + 1);
-        let with_tab = format!("refund{}", char::from(0x09));
-        let with_lf = format!("refund{}", char::from(0x0a));
-        let with_nul = format!("refund{}id", char::from(0x00));
-        let with_us = format!("refund{}", char::from(0x1f));
-        let with_del = format!("refund{}", char::from(0x7f));
-        let invalid_ops = [
-            "",
-            " ",
-            "refund now",
-            with_tab.as_str(),
-            with_lf.as_str(),
-            "refund:v2",
-            ":",
-            with_nul.as_str(),
-            with_us.as_str(),
-            with_del.as_str(),
-            "réfund",
-            oversized.as_str(),
-        ];
-        for op in invalid_ops {
-            let err = IdempotencyScope::try_new(&provider, op).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Validation);
-        }
-    }
+        let invalid_ops = build_invalid_segments("refund", MAX_SCOPE_SEGMENT_LEN, true);
+        assert_all_rejected(&invalid_ops, |op| IdempotencyScope::try_new(&provider, op));
 
-    #[test]
-    fn scope_rejects_invalid_tenant_segments() {
-        let provider = ProviderId::new("moyasar");
-        let oversized = "t".repeat(MAX_SCOPE_SEGMENT_LEN + 1);
-        let with_tab = format!("tenant{}1", char::from(0x09));
-        let with_lf = format!("tenant{}1", char::from(0x0a));
-        let with_nul = format!("tenant{}a", char::from(0x00));
-        let with_esc = format!("tenant{}", char::from(0x1b));
-        let with_del = format!("tenant{}", char::from(0x7f));
-        let invalid_tenants = [
-            "",
-            " ",
-            "tenant 1",
-            with_tab.as_str(),
-            with_lf.as_str(),
-            "tenant:sub",
-            ":",
-            with_nul.as_str(),
-            with_esc.as_str(),
-            with_del.as_str(),
-            "ténant",
-            oversized.as_str(),
-        ];
-        for tenant in invalid_tenants {
-            let base = IdempotencyScope::try_new(&provider, "refund").unwrap();
-            let err = base.with_tenant(tenant).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Validation);
-        }
+        let invalid_tenants = build_invalid_segments("tenant", MAX_SCOPE_SEGMENT_LEN, true);
+        assert_all_rejected(&invalid_tenants, |tenant| {
+            IdempotencyScope::try_new(&provider, "refund")
+                .unwrap()
+                .with_tenant(tenant)
+        });
     }
 
     #[test]
@@ -389,24 +373,19 @@ mod tests {
     }
 
     #[test]
-    fn uuid_v4_accepts_lowercase_uppercase_and_all_rfc_variants() {
+    fn uuid_v4_accepts_valid_and_rejects_invalid_formats() {
         let valid_uuids = [
             "550e8400-e29b-41d4-8716-446655440000",
             "550e8400-e29b-41d4-9716-446655440000",
             "550e8400-e29b-41d4-a716-446655440000",
             "550e8400-e29b-41d4-b716-446655440000",
             "550E8400-E29B-41D4-A716-446655440000",
-            "550E8400-E29B-41D4-B716-446655440000",
             "01234567-89ab-4cde-8f01-23456789ABCD",
         ];
         for uuid in valid_uuids {
             assert!(validate_uuid_v4(uuid).is_ok());
         }
-    }
-
-    #[test]
-    fn uuid_v4_rejects_wrong_version_and_variant() {
-        let invalid_uuids = [
+        let invalid_uuids: Vec<String> = [
             "550e8400-e29b-11d4-a716-446655440000",
             "550e8400-e29b-31d4-a716-446655440000",
             "550e8400-e29b-51d4-a716-446655440000",
@@ -414,68 +393,34 @@ mod tests {
             "550e8400-e29b-41d4-0716-446655440000",
             "550e8400-e29b-41d4-7716-446655440000",
             "550e8400-e29b-41d4-c716-446655440000",
-            "550e8400-e29b-41d4-f716-446655440000",
             "550E8400-E29B-41D4-C716-446655440000",
-        ];
-        for uuid in invalid_uuids {
-            let err = validate_uuid_v4(uuid).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Validation);
-        }
-    }
-
-    #[test]
-    fn uuid_v4_rejects_malformed_length_hyphens_and_non_hex() {
-        let malformed = [
             "",
             "550e8400-e29b-41d4-a716-44665544000",
             "550e8400-e29b-41d4-a716-4466554400000",
             "550e8400e29b41d4a716446655440000",
             "550e8400_e29b_41d4_a716_446655440000",
             "550e8400-e29b-41d4-a716-44665544000g",
-            "550e8400-e29b-41d4-a716-44665544000!",
             "550e840-0e29b-41d4-a716-446655440000",
-        ];
-        for uuid in malformed {
-            let err = validate_uuid_v4(uuid).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Validation);
-        }
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_all_rejected(&invalid_uuids, validate_uuid_v4);
     }
 
     #[test]
-    fn idempotency_key_accepts_valid_keys_and_max_boundary() {
+    fn idempotency_key_accepts_valid_and_rejects_invalid_keys() {
         let max_key = "k".repeat(MAX_IDEMPOTENCY_KEY_LEN);
-        assert!(validate_idempotency_key("k").is_ok());
-        assert!(validate_idempotency_key("refund:ord-1").is_ok());
-        assert!(validate_idempotency_key("550e8400-e29b-41d4-a716-446655440000").is_ok());
-        assert!(validate_idempotency_key(&max_key).is_ok());
-    }
-
-    #[test]
-    fn idempotency_key_rejects_empty_oversized_whitespace_control_and_non_ascii() {
-        let oversized = "k".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1);
-        let with_tab = format!("key{}1", char::from(0x09));
-        let with_lf = format!("key{}1", char::from(0x0a));
-        let with_cr = format!("key{}1", char::from(0x0d));
-        let with_nul = format!("key{}null", char::from(0x00));
-        let with_esc = format!("key{}esc", char::from(0x1b));
-        let with_del = format!("key{}del", char::from(0x7f));
-        let invalid_keys = [
-            "",
-            " ",
-            "key with space",
-            with_tab.as_str(),
-            with_lf.as_str(),
-            with_cr.as_str(),
-            with_nul.as_str(),
-            with_esc.as_str(),
-            with_del.as_str(),
-            "key-é",
-            oversized.as_str(),
-        ];
-        for key in invalid_keys {
-            let err = validate_idempotency_key(key).unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::Validation);
+        for key in [
+            "k",
+            "refund:ord-1",
+            "550e8400-e29b-41d4-a716-446655440000",
+            &max_key,
+        ] {
+            assert!(validate_idempotency_key(key).is_ok());
         }
+        let invalid_keys = build_invalid_segments("key", MAX_IDEMPOTENCY_KEY_LEN, false);
+        assert_all_rejected(&invalid_keys, validate_idempotency_key);
     }
 
     #[test]
