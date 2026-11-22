@@ -34,7 +34,10 @@ impl PaymentProvider for StubWebhookProvider {
         PaymentCapabilities::empty()
     }
 
-    async fn create_payment(&self, _: &CreatePaymentRequest) -> Result<PaymentResult, PaymentError> {
+    async fn create_payment(
+        &self,
+        _: &CreatePaymentRequest,
+    ) -> Result<PaymentResult, PaymentError> {
         Err(PaymentError::unsupported(&self.id, "create_payment"))
     }
 

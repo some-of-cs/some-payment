@@ -674,8 +674,7 @@ mod tests {
         };
         let completed_pay =
             sample_payment(PaymentStatus::PartiallyRefunded, Some(10_000), Some(5_000));
-        let (res, store) =
-            run_case("moyasar:refund", "ord-314", kind, completed_pay.clone()).await;
+        let (res, store) = run_case("moyasar:refund", "ord-314", kind, completed_pay.clone()).await;
         assert_eq!(
             (res, store.counts()),
             (ReconciliationOutcome::Completed(completed_pay), (1, 0))
@@ -773,8 +772,7 @@ mod tests {
             (ReconciliationOutcome::Released(paid), (0, 1))
         );
         let refunded = sample_payment(PaymentStatus::Refunded, Some(10_000), None);
-        let (done, done_store) =
-            run_case("moyasar:refund", "ord-z2", kind, refunded.clone()).await;
+        let (done, done_store) = run_case("moyasar:refund", "ord-z2", kind, refunded.clone()).await;
         assert_eq!(
             (done, done_store.counts()),
             (ReconciliationOutcome::Completed(refunded), (1, 0))
@@ -794,8 +792,13 @@ mod tests {
         );
         let later_refunded =
             sample_payment(PaymentStatus::PartiallyRefunded, Some(10_000), Some(3_000));
-        let (ref_res, ref_store) =
-            run_case("paymob:capture", "ord-cap-ref", kind, later_refunded.clone()).await;
+        let (ref_res, ref_store) = run_case(
+            "paymob:capture",
+            "ord-cap-ref",
+            kind,
+            later_refunded.clone(),
+        )
+        .await;
         assert_eq!(
             (ref_res, ref_store.counts()),
             (ReconciliationOutcome::Completed(later_refunded), (1, 0))
@@ -826,15 +829,23 @@ mod tests {
             run_case("paymob:capture", "ord-cap-proc", kind, processing.clone()).await;
         assert_eq!(
             (hold, hold_store.counts()),
-            (ReconciliationOutcome::StillIndeterminate(processing), (0, 0))
+            (
+                ReconciliationOutcome::StillIndeterminate(processing),
+                (0, 0)
+            )
         );
     }
 
     #[tokio::test]
     async fn void_reconciliation_handles_completed_released_and_indeterminate() {
         let voided = sample_payment(PaymentStatus::Voided, None, None);
-        let (done, done_store) =
-            run_case("paymob:void", "ord-v1", ReconciliationKind::Void, voided.clone()).await;
+        let (done, done_store) = run_case(
+            "paymob:void",
+            "ord-v1",
+            ReconciliationKind::Void,
+            voided.clone(),
+        )
+        .await;
         assert_eq!(
             (done, done_store.counts()),
             (ReconciliationOutcome::Completed(voided), (1, 0))
@@ -861,7 +872,10 @@ mod tests {
         .await;
         assert_eq!(
             (hold, hold_store.counts()),
-            (ReconciliationOutcome::StillIndeterminate(req_action), (0, 0))
+            (
+                ReconciliationOutcome::StillIndeterminate(req_action),
+                (0, 0)
+            )
         );
     }
 
