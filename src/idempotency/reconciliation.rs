@@ -299,7 +299,9 @@ async fn release_reconciliation(
     request: &ReconciliationRequest<'_>,
     payment: PaymentResult,
 ) -> Result<ReconciliationOutcome, PaymentError> {
-    store.release(request.entry.scope, request.entry.key).await?;
+    store
+        .release(request.entry.scope, request.entry.key)
+        .await?;
     tracing::info!(
         provider = provider.id().as_str(),
         scope = request.entry.scope,
@@ -329,7 +331,10 @@ fn evaluate_refund(
     let verified = if expected_min_refunded_amount > 0 {
         refunded >= expected_min_refunded_amount
     } else {
-        matches!(payment.status, PaymentStatus::Refunded | PaymentStatus::PartiallyRefunded)
+        matches!(
+            payment.status,
+            PaymentStatus::Refunded | PaymentStatus::PartiallyRefunded
+        )
     };
 
     if verified {
@@ -377,7 +382,10 @@ fn evaluate_capture(
 }
 
 fn evaluate_void(payment: &PaymentResult) -> ReconciliationDecision {
-    if matches!(payment.status, PaymentStatus::Voided | PaymentStatus::Canceled) {
+    if matches!(
+        payment.status,
+        PaymentStatus::Voided | PaymentStatus::Canceled
+    ) {
         return ReconciliationDecision::Complete;
     }
 
@@ -393,7 +401,10 @@ fn evaluate_void(payment: &PaymentResult) -> ReconciliationDecision {
 
 fn redact_for_cache(payment: &PaymentResult) -> PaymentResult {
     let mut sanitized = payment.clone();
-    if matches!(sanitized.next_action, Some(NextAction::EmbeddedClientSecret { .. })) {
+    if matches!(
+        sanitized.next_action,
+        Some(NextAction::EmbeddedClientSecret { .. })
+    ) {
         sanitized.next_action = Some(NextAction::EmbeddedClientSecret {
             client_secret: "[REDACTED]".to_owned(),
         });
@@ -552,7 +563,10 @@ mod tests {
         );
 
         let res = reconcile_indeterminate_mutation(&provider, &store, &request).await;
-        assert_eq!(res.unwrap(), ReconciliationOutcome::Completed(payment.clone()));
+        assert_eq!(
+            res.unwrap(),
+            ReconciliationOutcome::Completed(payment.clone())
+        );
         assert_eq!(store.complete_calls.load(Ordering::SeqCst), 1);
         assert_eq!(store.release_calls.load(Ordering::SeqCst), 0);
 
@@ -602,7 +616,10 @@ mod tests {
         );
 
         let res = reconcile_indeterminate_mutation(&provider, &store, &request).await;
-        assert_eq!(res.unwrap(), ReconciliationOutcome::StillIndeterminate(payment));
+        assert_eq!(
+            res.unwrap(),
+            ReconciliationOutcome::StillIndeterminate(payment)
+        );
         assert_eq!(store.complete_calls.load(Ordering::SeqCst), 0);
         assert_eq!(store.release_calls.load(Ordering::SeqCst), 0);
     }
@@ -630,7 +647,10 @@ mod tests {
         let provider_refunded = MockProvider::returning(refunded.clone());
         let completed =
             reconcile_indeterminate_mutation(&provider_refunded, &store, &request).await;
-        assert_eq!(completed.unwrap(), ReconciliationOutcome::Completed(refunded));
+        assert_eq!(
+            completed.unwrap(),
+            ReconciliationOutcome::Completed(refunded)
+        );
         assert_eq!(store.complete_calls.load(Ordering::SeqCst), 1);
     }
 
@@ -666,7 +686,10 @@ mod tests {
         let store_retain = RecordingStore::default();
         let provider = MockProvider::returning(processing.clone());
         let res = reconcile_indeterminate_mutation(&provider, &store_retain, &request).await;
-        assert_eq!(res.unwrap(), ReconciliationOutcome::StillIndeterminate(processing));
+        assert_eq!(
+            res.unwrap(),
+            ReconciliationOutcome::StillIndeterminate(processing)
+        );
         assert_eq!(store_retain.complete_calls.load(Ordering::SeqCst), 0);
         assert_eq!(store_retain.release_calls.load(Ordering::SeqCst), 0);
     }
