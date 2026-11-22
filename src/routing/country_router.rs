@@ -52,34 +52,19 @@ impl RoutingPolicy for RegionalCurrencyRouter {
         ctx: &RoutingContext,
         registry: &ProviderRegistry,
     ) -> Result<ProviderId, PaymentError> {
-        if let Some(explicit) = resolve_explicit(ctx, registry)? {
-            return Ok(explicit);
-        }
-
-        let required = ctx.required_capabilities;
-        let currency_candidate = ctx
+        let currency = ctx
             .currency
             .as_ref()
-            .and_then(|code| lookup_static_route(REGIONAL_CURRENCY_ROUTES, code.as_str()))
-            .filter(|id| is_capable(registry, id, required));
+            .and_then(|code| lookup_static_route(REGIONAL_CURRENCY_ROUTES, code.as_str()));
+        let country = ctx
+            .buyer_country
+            .as_deref()
+            .map(normalize_code)
+            .and_then(|code| lookup_static_route(REGIONAL_COUNTRY_ROUTES, &code));
+        let international = Some(ProviderId::new(INTERNATIONAL_DEFAULT_SLUG));
+        let candidates = [currency, country, international].into_iter().flatten();
 
-        let country_candidate = || {
-            ctx.buyer_country
-                .as_deref()
-                .map(normalize_code)
-                .and_then(|code| lookup_static_route(REGIONAL_COUNTRY_ROUTES, &code))
-                .filter(|id| is_capable(registry, id, required))
-        };
-
-        let international_candidate = || {
-            let id = ProviderId::new(INTERNATIONAL_DEFAULT_SLUG);
-            is_capable(registry, &id, required).then_some(id)
-        };
-
-        Ok(currency_candidate
-            .or_else(country_candidate)
-            .or_else(international_candidate)
-            .unwrap_or_else(|| registry.default_id().clone()))
+        select_with_candidates(ctx, registry, candidates)
     }
 }
 
@@ -157,38 +142,21 @@ impl RoutingPolicy for CountryRoutingPolicy {
         ctx: &RoutingContext,
         registry: &ProviderRegistry,
     ) -> Result<ProviderId, PaymentError> {
-        if let Some(explicit) = resolve_explicit(ctx, registry)? {
-            return Ok(explicit);
-        }
-
-        let required = ctx.required_capabilities;
-        let currency_candidate = ctx
+        let currency = ctx
             .currency
             .as_ref()
             .and_then(|code| self.currency_routes.get(code.as_str()))
-            .filter(|id| is_capable(registry, id, required))
             .cloned();
+        let country = ctx
+            .buyer_country
+            .as_deref()
+            .map(normalize_code)
+            .and_then(|code| self.country_routes.get(&code))
+            .cloned();
+        let fallback = self.fallback.clone();
+        let candidates = [currency, country, fallback].into_iter().flatten();
 
-        let country_candidate = || {
-            ctx.buyer_country
-                .as_deref()
-                .map(normalize_code)
-                .and_then(|code| self.country_routes.get(&code))
-                .filter(|id| is_capable(registry, id, required))
-                .cloned()
-        };
-
-        let fallback_candidate = || {
-            self.fallback
-                .as_ref()
-                .filter(|id| is_capable(registry, id, required))
-                .cloned()
-        };
-
-        Ok(currency_candidate
-            .or_else(country_candidate)
-            .or_else(fallback_candidate)
-            .unwrap_or_else(|| registry.default_id().clone()))
+        select_with_candidates(ctx, registry, candidates)
     }
 }
 
@@ -205,10 +173,7 @@ impl CountryRoutingPolicyBuilder {
     /// ASCII uppercase.
     #[must_use]
     pub fn route_country(mut self, country_iso2: impl AsRef<str>, provider_id: ProviderId) -> Self {
-        let normalized = normalize_code(country_iso2);
-        if !normalized.is_empty() {
-            self.country_routes.insert(normalized, provider_id);
-        }
+        insert_normalized(&mut self.country_routes, country_iso2, provider_id);
         self
     }
 
@@ -220,10 +185,7 @@ impl CountryRoutingPolicyBuilder {
         currency_iso3: impl AsRef<str>,
         provider_id: ProviderId,
     ) -> Self {
-        let normalized = normalize_code(currency_iso3);
-        if !normalized.is_empty() {
-            self.currency_routes.insert(normalized, provider_id);
-        }
+        insert_normalized(&mut self.currency_routes, currency_iso3, provider_id);
         self
     }
 
@@ -261,6 +223,34 @@ fn is_capable(registry: &ProviderRegistry, id: &ProviderId, required: PaymentCap
     registry
         .get(id)
         .is_some_and(|provider| provider.capabilities().contains(required))
+}
+
+fn insert_normalized(
+    map: &mut BTreeMap<String, ProviderId>,
+    key: impl AsRef<str>,
+    provider_id: ProviderId,
+) {
+    let normalized = normalize_code(key);
+    if !normalized.is_empty() {
+        map.insert(normalized, provider_id);
+    }
+}
+
+fn select_with_candidates(
+    ctx: &RoutingContext,
+    registry: &ProviderRegistry,
+    candidates: impl IntoIterator<Item = ProviderId>,
+) -> Result<ProviderId, PaymentError> {
+    if let Some(explicit) = resolve_explicit(ctx, registry)? {
+        return Ok(explicit);
+    }
+
+    let required = ctx.required_capabilities;
+    let selected = candidates
+        .into_iter()
+        .find(|id| is_capable(registry, id, required))
+        .unwrap_or_else(|| registry.default_id().clone());
+    Ok(selected)
 }
 
 fn resolve_explicit(
@@ -376,50 +366,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn regional_router_routes_sar_egp_and_usd() {
+    fn assert_regional_routes(cases: &[(RoutingContext, &str)]) {
         let registry = standard_registry();
         let router = RegionalCurrencyRouter;
+        for (ctx, expected) in cases {
+            assert_eq!(
+                router.select(ctx, &registry).unwrap(),
+                ProviderId::new(*expected)
+            );
+        }
+    }
 
-        let sar = routing_ctx(None, Some("SAR"), None, PaymentCapabilities::DIRECT_PAYMENT);
-        let egp = routing_ctx(None, Some("EGP"), None, PaymentCapabilities::DIRECT_PAYMENT);
-        let usd = routing_ctx(None, Some("USD"), None, PaymentCapabilities::DIRECT_PAYMENT);
-
-        assert_eq!(
-            router.select(&sar, &registry).unwrap(),
-            ProviderId::new("moyasar")
-        );
-        assert_eq!(
-            router.select(&egp, &registry).unwrap(),
-            ProviderId::new("paymob")
-        );
-        assert_eq!(
-            router.select(&usd, &registry).unwrap(),
-            ProviderId::new("stripe")
-        );
+    #[test]
+    fn regional_router_routes_sar_egp_and_usd() {
+        let caps = PaymentCapabilities::DIRECT_PAYMENT;
+        assert_regional_routes(&[
+            (routing_ctx(None, Some("SAR"), None, caps), "moyasar"),
+            (routing_ctx(None, Some("EGP"), None, caps), "paymob"),
+            (routing_ctx(None, Some("USD"), None, caps), "stripe"),
+        ]);
     }
 
     #[test]
     fn regional_router_routes_by_normalized_country_when_currency_missing() {
-        let registry = standard_registry();
-        let router = RegionalCurrencyRouter;
-
-        let sa = routing_ctx(None, None, Some(" sa "), PaymentCapabilities::empty());
-        let eg = routing_ctx(None, None, Some("eg"), PaymentCapabilities::empty());
-        let us = routing_ctx(None, None, Some("US"), PaymentCapabilities::empty());
-
-        assert_eq!(
-            router.select(&sa, &registry).unwrap(),
-            ProviderId::new("moyasar")
-        );
-        assert_eq!(
-            router.select(&eg, &registry).unwrap(),
-            ProviderId::new("paymob")
-        );
-        assert_eq!(
-            router.select(&us, &registry).unwrap(),
-            ProviderId::new("stripe")
-        );
+        let caps = PaymentCapabilities::empty();
+        assert_regional_routes(&[
+            (routing_ctx(None, None, Some(" sa "), caps), "moyasar"),
+            (routing_ctx(None, None, Some("eg"), caps), "paymob"),
+            (routing_ctx(None, None, Some("US"), caps), "stripe"),
+        ]);
     }
 
     #[test]

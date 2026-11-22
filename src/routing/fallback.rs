@@ -73,19 +73,34 @@ fn classify_attempt<T>(result: Result<T, PaymentError>) -> AttemptOutcome<T> {
     }
 }
 
-async fn execute_fallbacks<T, R, F, Fut>(
+trait ProviderLookup {
+    fn require(&self, id: &ProviderId) -> Result<Arc<dyn PaymentProvider>, PaymentError>;
+    fn get(&self, id: &ProviderId) -> Option<Arc<dyn PaymentProvider>>;
+}
+
+impl ProviderLookup for ProviderRegistry {
+    fn require(&self, id: &ProviderId) -> Result<Arc<dyn PaymentProvider>, PaymentError> {
+        ProviderRegistry::require(self, id)
+    }
+
+    fn get(&self, id: &ProviderId) -> Option<Arc<dyn PaymentProvider>> {
+        ProviderRegistry::get(self, id)
+    }
+}
+
+async fn execute_fallbacks<T, L, F, Fut>(
     candidates: Vec<ProviderId>,
     mut last_error: PaymentError,
-    mut resolve_candidate: R,
+    lookup: &L,
     mut op: F,
 ) -> Result<T, PaymentError>
 where
-    R: FnMut(&ProviderId) -> Option<Arc<dyn PaymentProvider>>,
+    L: ProviderLookup,
     F: FnMut(Arc<dyn PaymentProvider>) -> Fut,
     Fut: std::future::Future<Output = Result<T, PaymentError>>,
 {
     for candidate in candidates {
-        let Some(provider) = resolve_candidate(&candidate) else {
+        let Some(provider) = lookup.get(&candidate) else {
             continue;
         };
         match classify_attempt(op(provider).await) {
@@ -220,36 +235,28 @@ impl FallbackPolicy {
         F: FnMut(Arc<dyn PaymentProvider>) -> Fut,
         Fut: std::future::Future<Output = Result<T, PaymentError>>,
     {
-        self.execute_with_resolver(
-            primary,
-            |id| registry.require(id),
-            |id| registry.get(id),
-            op,
-        )
-        .await
+        self.execute_with_resolver(primary, registry, op).await
     }
 
-    async fn execute_with_resolver<T, P, R, F, Fut>(
+    async fn execute_with_resolver<T, L, F, Fut>(
         &self,
         primary: &ProviderId,
-        resolve_primary: P,
-        resolve_candidate: R,
+        lookup: &L,
         mut op: F,
     ) -> Result<T, PaymentError>
     where
-        P: FnOnce(&ProviderId) -> Result<Arc<dyn PaymentProvider>, PaymentError>,
-        R: FnMut(&ProviderId) -> Option<Arc<dyn PaymentProvider>>,
+        L: ProviderLookup,
         F: FnMut(Arc<dyn PaymentProvider>) -> Fut,
         Fut: std::future::Future<Output = Result<T, PaymentError>>,
     {
-        let primary_provider = resolve_primary(primary)?;
+        let primary_provider = lookup.require(primary)?;
         let last_error = match classify_attempt(op(primary_provider).await) {
             AttemptOutcome::Final(result) => return result,
             AttemptOutcome::Retryable(err) => err,
         };
 
         let candidates = self.next_candidates(primary);
-        execute_fallbacks(candidates, last_error, resolve_candidate, op).await
+        execute_fallbacks(candidates, last_error, lookup, op).await
     }
 }
 
@@ -315,13 +322,16 @@ mod tests {
             .collect()
     }
 
-    fn require_stub(
-        map: &HashMap<ProviderId, Arc<dyn PaymentProvider>>,
-        id: &ProviderId,
-    ) -> Result<Arc<dyn PaymentProvider>, PaymentError> {
-        map.get(id)
-            .cloned()
-            .ok_or_else(|| PaymentError::configuration("provider not registered"))
+    impl ProviderLookup for HashMap<ProviderId, Arc<dyn PaymentProvider>> {
+        fn require(&self, id: &ProviderId) -> Result<Arc<dyn PaymentProvider>, PaymentError> {
+            HashMap::get(self, id)
+                .cloned()
+                .ok_or_else(|| PaymentError::configuration("provider not registered"))
+        }
+
+        fn get(&self, id: &ProviderId) -> Option<Arc<dyn PaymentProvider>> {
+            HashMap::get(self, id).cloned()
+        }
     }
 
     fn pre_charge_unavailable(slug: &str) -> PaymentError {
@@ -440,95 +450,56 @@ mod tests {
         assert_eq!(long_chain.next_candidates(&a), vec![b, c, d]);
     }
 
-    #[tokio::test]
-    async fn pre_charge_unavailable_fails_over_to_fallback() {
+    async fn run_failover_scenario(primary_err: PaymentError, expect_fallback: bool) {
+        let expected_kind = primary_err.kind();
         let paymob = ProviderId::new("paymob");
         let stripe = ProviderId::new("stripe");
         let map = stub_map(&["paymob", "stripe"]);
         let policy = FallbackPolicy::new().with_fallback(paymob.clone(), stripe);
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut pending_err = Some(primary_err);
 
-        let outcome = policy
-            .execute_with_resolver(
-                &paymob,
-                |id| require_stub(&map, id),
-                |id| map.get(id).cloned(),
-                |provider| {
-                    let calls = Arc::clone(&calls);
-                    async move {
-                        let slug = provider.id().as_str().to_owned();
-                        calls.lock().unwrap().push(slug.clone());
-                        if slug == "paymob" {
-                            Err(pre_charge_unavailable("paymob"))
-                        } else {
-                            Ok(format!("charged:{slug}"))
-                        }
+        let result = policy
+            .execute_with_resolver(&paymob, &map, |provider| {
+                let calls = Arc::clone(&calls);
+                let slug = provider.id().as_str().to_owned();
+                let next_err = if slug == "paymob" {
+                    pending_err.take()
+                } else {
+                    None
+                };
+                async move {
+                    calls.lock().unwrap().push(slug.clone());
+                    match next_err {
+                        Some(err) => Err(err),
+                        None => Ok(format!("charged:{slug}")),
                     }
-                },
-            )
-            .await
-            .unwrap();
+                }
+            })
+            .await;
 
-        assert_eq!(outcome, "charged:stripe");
-        assert_eq!(*calls.lock().unwrap(), vec!["paymob", "stripe"]);
+        if expect_fallback {
+            assert_eq!(result.unwrap(), "charged:stripe");
+            assert_eq!(*calls.lock().unwrap(), vec!["paymob", "stripe"]);
+        } else {
+            assert_eq!(result.unwrap_err().kind(), expected_kind);
+            assert_eq!(*calls.lock().unwrap(), vec!["paymob"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_charge_unavailable_fails_over_to_fallback() {
+        run_failover_scenario(pre_charge_unavailable("paymob"), true).await;
     }
 
     #[tokio::test]
     async fn card_declined_never_fails_over() {
-        let paymob = ProviderId::new("paymob");
-        let stripe = ProviderId::new("stripe");
-        let map = stub_map(&["paymob", "stripe"]);
-        let policy = FallbackPolicy::new().with_fallback(paymob.clone(), stripe);
-        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
-
-        let err = policy
-            .execute_with_resolver(
-                &paymob,
-                |id| require_stub(&map, id),
-                |id| map.get(id).cloned(),
-                |provider| {
-                    let calls = Arc::clone(&calls);
-                    async move {
-                        let slug = provider.id().as_str().to_owned();
-                        calls.lock().unwrap().push(slug.clone());
-                        Err::<String, PaymentError>(card_declined(&slug))
-                    }
-                },
-            )
-            .await
-            .unwrap_err();
-
-        assert_eq!(err.kind(), ErrorKind::CardDeclined);
-        assert_eq!(*calls.lock().unwrap(), vec!["paymob"]);
+        run_failover_scenario(card_declined("paymob"), false).await;
     }
 
     #[tokio::test]
     async fn ambiguous_timeout_never_fails_over() {
-        let paymob = ProviderId::new("paymob");
-        let stripe = ProviderId::new("stripe");
-        let map = stub_map(&["paymob", "stripe"]);
-        let policy = FallbackPolicy::new().with_fallback(paymob.clone(), stripe);
-        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
-
-        let err = policy
-            .execute_with_resolver(
-                &paymob,
-                |id| require_stub(&map, id),
-                |id| map.get(id).cloned(),
-                |provider| {
-                    let calls = Arc::clone(&calls);
-                    async move {
-                        let slug = provider.id().as_str().to_owned();
-                        calls.lock().unwrap().push(slug.clone());
-                        Err::<String, PaymentError>(ambiguous_timeout(&slug))
-                    }
-                },
-            )
-            .await
-            .unwrap_err();
-
-        assert_eq!(err.kind(), ErrorKind::ProviderUnavailable);
-        assert_eq!(*calls.lock().unwrap(), vec!["paymob"]);
+        run_failover_scenario(ambiguous_timeout("paymob"), false).await;
     }
 
     #[tokio::test]
@@ -542,19 +513,14 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
 
         let err = policy
-            .execute_with_resolver(
-                &a,
-                |id| require_stub(&map, id),
-                |id| map.get(id).cloned(),
-                |provider| {
-                    let calls = Arc::clone(&calls);
-                    async move {
-                        let slug = provider.id().as_str().to_owned();
-                        calls.lock().unwrap().push(slug.clone());
-                        Err::<String, PaymentError>(pre_charge_unavailable(&slug))
-                    }
-                },
-            )
+            .execute_with_resolver(&a, &map, |provider| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    let slug = provider.id().as_str().to_owned();
+                    calls.lock().unwrap().push(slug.clone());
+                    Err::<String, PaymentError>(pre_charge_unavailable(&slug))
+                }
+            })
             .await
             .unwrap_err();
 
@@ -581,19 +547,14 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
 
         let err = policy
-            .execute_with_resolver(
-                &a,
-                |id| require_stub(&map, id),
-                |id| map.get(id).cloned(),
-                |provider| {
-                    let calls = Arc::clone(&calls);
-                    async move {
-                        let slug = provider.id().as_str().to_owned();
-                        calls.lock().unwrap().push(slug.clone());
-                        Err::<String, PaymentError>(pre_charge_unavailable(&slug))
-                    }
-                },
-            )
+            .execute_with_resolver(&a, &map, |provider| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    let slug = provider.id().as_str().to_owned();
+                    calls.lock().unwrap().push(slug.clone());
+                    Err::<String, PaymentError>(pre_charge_unavailable(&slug))
+                }
+            })
             .await
             .unwrap_err();
 
@@ -613,29 +574,21 @@ mod tests {
             .with_fallback(b, c);
 
         let missing_err = policy
-            .execute_with_resolver(
-                &missing,
-                |id| require_stub(&map, id),
-                |id| map.get(id).cloned(),
-                |_| async { Ok::<String, PaymentError>("never".into()) },
-            )
+            .execute_with_resolver(&missing, &map, |_| async {
+                Ok::<String, PaymentError>("never".into())
+            })
             .await
             .unwrap_err();
         assert_eq!(missing_err.kind(), ErrorKind::Configuration);
 
         let outcome = policy
-            .execute_with_resolver(
-                &a,
-                |id| require_stub(&map, id),
-                |id| map.get(id).cloned(),
-                |provider| async move {
-                    if provider.id().as_str() == "alpha" {
-                        Err(pre_charge_unavailable("alpha"))
-                    } else {
-                        Ok(provider.id().as_str().to_owned())
-                    }
-                },
-            )
+            .execute_with_resolver(&a, &map, |provider| async move {
+                if provider.id().as_str() == "alpha" {
+                    Err(pre_charge_unavailable("alpha"))
+                } else {
+                    Ok(provider.id().as_str().to_owned())
+                }
+            })
             .await
             .unwrap();
         assert_eq!(outcome, "gamma");
@@ -653,23 +606,18 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
 
         let err = policy
-            .execute_with_resolver(
-                &a,
-                |id| require_stub(&map, id),
-                |id| map.get(id).cloned(),
-                |provider| {
-                    let calls = Arc::clone(&calls);
-                    async move {
-                        let slug = provider.id().as_str().to_owned();
-                        calls.lock().unwrap().push(slug.clone());
-                        if slug == "alpha" {
-                            Err(pre_charge_unavailable("alpha"))
-                        } else {
-                            Err::<String, PaymentError>(card_declined(&slug))
-                        }
+            .execute_with_resolver(&a, &map, |provider| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    let slug = provider.id().as_str().to_owned();
+                    calls.lock().unwrap().push(slug.clone());
+                    if slug == "alpha" {
+                        Err(pre_charge_unavailable("alpha"))
+                    } else {
+                        Err::<String, PaymentError>(card_declined(&slug))
                     }
-                },
-            )
+                }
+            })
             .await
             .unwrap_err();
 
