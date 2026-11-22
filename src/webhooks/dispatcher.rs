@@ -6,12 +6,13 @@ use std::fmt;
 use std::hash::BuildHasher;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde_json::{Map, Value};
 use some_payment_core::{
     NormalizedWebhookEvent, PaymentError, PaymentProvider, ProviderId, RawWebhookRequest,
     VerificationChallenge,
 };
+
+use super::dedup_guard::WebhookDeduplicationStore;
 
 /// Default maximum accepted raw webhook body size (1 MiB).
 ///
@@ -64,27 +65,6 @@ where
     }
 }
 
-/// Async deduplication recorder invoked strictly after webhook verification succeeds.
-///
-/// Implementations persist `(provider_id, event_id)` atomically and report whether
-/// the event was newly recorded (`Ok(true)`) or already seen (`Ok(false)`).
-#[async_trait]
-pub trait WebhookDedupRecorder: Send + Sync {
-    /// Records `(provider_id, event_id)` if unseen.
-    ///
-    /// Returns `Ok(true)` when the event is new and should be processed, or
-    /// `Ok(false)` when it is a duplicate replay.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`PaymentError`] if the underlying deduplication store fails.
-    async fn record_if_new(
-        &self,
-        provider_id: &ProviderId,
-        event_id: &str,
-    ) -> Result<bool, PaymentError>;
-}
-
 /// Classification returned by [`WebhookDispatcher::handle_webhook`].
 ///
 /// Sensitive fields inside [`VerificationChallenge`] remain redacted in [`fmt::Debug`].
@@ -112,12 +92,11 @@ pub enum WebhookOutcome {
 ///
 /// ```
 /// use std::collections::BTreeMap;
-/// use std::sync::{Arc, Mutex};
+/// use std::sync::Arc;
 ///
 /// use async_trait::async_trait;
-/// use some_payment::webhooks::dispatcher::{
-///     WebhookDedupRecorder, WebhookDispatcher, WebhookOutcome,
-/// };
+/// use some_payment::webhooks::dedup_guard::InMemoryDedupStore;
+/// use some_payment::webhooks::dispatcher::{WebhookDispatcher, WebhookOutcome};
 /// use some_payment_core::{
 ///     CreatePaymentRequest, HttpMethod, NormalizedWebhookEvent, PaymentCapabilities,
 ///     PaymentError, PaymentProvider, PaymentResult, PaymentStatus, ProviderId,
@@ -166,31 +145,12 @@ pub enum WebhookOutcome {
 ///     }
 /// }
 ///
-/// struct MemoryDedup(Mutex<Vec<(ProviderId, String)>>);
-///
-/// #[async_trait]
-/// impl WebhookDedupRecorder for MemoryDedup {
-///     async fn record_if_new(
-///         &self,
-///         provider_id: &ProviderId,
-///         event_id: &str,
-///     ) -> Result<bool, PaymentError> {
-///         let mut seen = self.0.lock().unwrap();
-///         let key = (provider_id.clone(), event_id.to_owned());
-///         if seen.contains(&key) {
-///             return Ok(false);
-///         }
-///         seen.push(key);
-///         Ok(true)
-///     }
-/// }
-///
 /// let mut providers: BTreeMap<ProviderId, Arc<dyn PaymentProvider>> = BTreeMap::new();
 /// providers.insert(
 ///     ProviderId::new("stripe"),
 ///     Arc::new(StubProvider(ProviderId::new("stripe"))),
 /// );
-/// let dispatcher = WebhookDispatcher::new(providers, MemoryDedup(Mutex::new(Vec::new())))
+/// let dispatcher = WebhookDispatcher::new(providers, InMemoryDedupStore::new())
 ///     .with_max_bytes(64 * 1024)
 ///     .unwrap();
 /// let raw = RawWebhookRequest {
@@ -255,7 +215,7 @@ impl<P, D> WebhookDispatcher<P, D> {
 impl<P, D> WebhookDispatcher<P, D>
 where
     P: WebhookProviderLookup,
-    D: WebhookDedupRecorder,
+    D: WebhookDeduplicationStore,
 {
     /// Verifies, scrubs, routes, and deduplicates an incoming raw webhook request.
     ///
@@ -265,7 +225,7 @@ where
     /// 3. Cryptographic/token verification via [`PaymentProvider::parse_and_verify_webhook`].
     /// 4. Recursive secret-scrub assertion over `event.raw_redacted`.
     /// 5. Early return for [`WebhookOutcome::VerificationHandshake`] without dedup access.
-    /// 6. Non-empty `event_id` validation and atomic deduplication via [`WebhookDedupRecorder`].
+    /// 6. Non-empty `event_id` validation and atomic deduplication via [`WebhookDeduplicationStore`].
     ///
     /// # Errors
     ///
@@ -275,7 +235,7 @@ where
     /// - [`PaymentError::ConfigurationError`] when no provider is registered for `provider_slug`.
     /// - [`PaymentError::WebhookVerificationFailed`] when provider verification fails,
     ///   unscrubbed secret fields appear in `raw_redacted`, or JSON nesting exceeds the depth cap.
-    /// - Any error propagated by [`WebhookDedupRecorder::record_if_new`].
+    /// - Any error propagated by [`WebhookDeduplicationStore::record_if_new`].
     pub async fn handle_webhook(
         &self,
         provider_slug: &str,
@@ -532,7 +492,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl WebhookDedupRecorder for CountingDedup {
+    impl WebhookDeduplicationStore for CountingDedup {
         async fn record_if_new(
             &self,
             provider_id: &ProviderId,
