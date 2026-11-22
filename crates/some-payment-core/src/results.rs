@@ -262,6 +262,18 @@ impl fmt::Debug for RawWebhookRequest {
     }
 }
 
+impl Drop for RawWebhookRequest {
+    fn drop(&mut self) {
+        self.raw_body.zeroize();
+        for value in self.headers.values_mut() {
+            value.zeroize();
+        }
+        for value in self.query_params.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
 impl RawWebhookRequest {
     /// Performs a case-insensitive header lookup.
     pub fn header(&self, name: &str) -> Option<&str> {
