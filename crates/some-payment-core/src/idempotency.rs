@@ -78,10 +78,15 @@ pub trait IdempotencyStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
-    struct MockStore;
+    #[derive(Default)]
+    struct MockStore {
+        completed_calls: AtomicUsize,
+        released_calls: AtomicUsize,
+    }
 
     #[async_trait]
     impl IdempotencyStore for MockStore {
@@ -101,17 +106,20 @@ mod tests {
             _entry: &IdempotencyEntry<'_>,
             _payload: &serde_json::Value,
         ) -> Result<(), PaymentError> {
+            self.completed_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
         async fn release(&self, _scope: &str, _key: &str) -> Result<(), PaymentError> {
+            self.released_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
 
     #[tokio::test]
-    async fn trait_is_object_safe_across_all_outcomes() {
-        let store: Arc<dyn IdempotencyStore> = Arc::new(MockStore);
+    async fn trait_is_object_safe_across_all_outcomes_and_mutations() {
+        let mock = Arc::new(MockStore::default());
+        let store: Arc<dyn IdempotencyStore> = mock.clone();
         let new_entry = IdempotencyEntry::new("refund", "new", 60);
         let busy_entry = IdempotencyEntry::new("refund", "busy", 60);
         let done_entry = IdempotencyEntry::new("refund", "done", 60);
@@ -128,5 +136,14 @@ mod tests {
             store.reserve(&done_entry).await.unwrap(),
             ReserveOutcome::Completed(_)
         ));
+
+        store
+            .complete(&new_entry, &serde_json::json!({"status": "succeeded"}))
+            .await
+            .unwrap();
+        store.release("refund", "new").await.unwrap();
+
+        assert_eq!(mock.completed_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(mock.released_calls.load(Ordering::SeqCst), 1);
     }
 }

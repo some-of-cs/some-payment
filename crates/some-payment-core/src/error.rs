@@ -3,7 +3,6 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::provider_id::ProviderId;
 
@@ -37,40 +36,92 @@ pub enum ErrorKind {
     Provider,
 }
 
-const KNOWN_ERROR_KINDS: &[(&str, ErrorKind)] = &[
-    ("validation", ErrorKind::Validation),
-    ("configuration", ErrorKind::Configuration),
-    ("unsupported", ErrorKind::Unsupported),
-    ("card_declined", ErrorKind::CardDeclined),
-    ("three_ds_failed", ErrorKind::ThreeDsFailed),
-    ("authentication", ErrorKind::Authentication),
-    ("rate_limited", ErrorKind::RateLimited),
-    ("provider_unavailable", ErrorKind::ProviderUnavailable),
+const ERROR_KIND_META: &[(&str, ErrorKind, &str)] = &[
+    ("validation", ErrorKind::Validation, "validation error"),
+    (
+        "configuration",
+        ErrorKind::Configuration,
+        "configuration error",
+    ),
+    (
+        "unsupported",
+        ErrorKind::Unsupported,
+        "unsupported operation",
+    ),
+    ("card_declined", ErrorKind::CardDeclined, "payment declined"),
+    (
+        "three_ds_failed",
+        ErrorKind::ThreeDsFailed,
+        "3DS authentication failed",
+    ),
+    (
+        "authentication",
+        ErrorKind::Authentication,
+        "merchant authentication failed",
+    ),
+    ("rate_limited", ErrorKind::RateLimited, "rate limited"),
+    (
+        "provider_unavailable",
+        ErrorKind::ProviderUnavailable,
+        "provider unavailable",
+    ),
     (
         "webhook_verification_failed",
         ErrorKind::WebhookVerificationFailed,
+        "webhook verification failed",
     ),
-    ("idempotency_conflict", ErrorKind::IdempotencyConflict),
-    ("aborted_by_hook", ErrorKind::AbortedByHook),
-    ("provider", ErrorKind::Provider),
+    (
+        "idempotency_conflict",
+        ErrorKind::IdempotencyConflict,
+        "idempotency conflict",
+    ),
+    (
+        "aborted_by_hook",
+        ErrorKind::AbortedByHook,
+        "aborted by lifecycle hook",
+    ),
+    ("provider", ErrorKind::Provider, "provider error"),
+];
+
+const RETRYABLE_KINDS: &[ErrorKind] = &[
+    ErrorKind::RateLimited,
+    ErrorKind::ProviderUnavailable,
+    ErrorKind::IdempotencyConflict,
+];
+
+const DEFINITIVE_KINDS: &[ErrorKind] = &[
+    ErrorKind::Validation,
+    ErrorKind::Configuration,
+    ErrorKind::Unsupported,
+    ErrorKind::Authentication,
+    ErrorKind::AbortedByHook,
 ];
 
 impl ErrorKind {
     /// Parses a snake_case error kind string using a static lookup table.
     pub fn from_slug(slug: &str) -> Option<Self> {
         let normalized = slug.trim().to_ascii_lowercase();
-        KNOWN_ERROR_KINDS
+        ERROR_KIND_META
             .iter()
-            .find(|(k, _)| *k == normalized)
-            .map(|(_, v)| *v)
+            .find(|(k, _, _)| *k == normalized)
+            .map(|(_, v, _)| *v)
+    }
+
+    /// Returns a safe, static human-readable summary for this error kind.
+    pub fn summary(self) -> &'static str {
+        ERROR_KIND_META
+            .iter()
+            .find(|(_, k, _)| *k == self)
+            .map_or("payment error", |(_, _, msg)| *msg)
     }
 }
 
 /// Canonical error returned by [`crate::PaymentProvider`] and orchestrator operations.
 ///
-/// Implements custom [`fmt::Debug`] formatting that redacts any attached
-/// provider diagnostic metadata so secret keys or cardholder data never leak
-/// into structured logs or panic traces.
+/// Implements custom [`fmt::Display`] and [`fmt::Debug`] formatting that never
+/// interpolate raw provider-sourced `message` or `reason` payloads, ensuring
+/// secret keys, webhook secrets, or cardholder data cannot leak into logs or
+/// panic traces.
 ///
 /// # Examples
 ///
@@ -80,24 +131,21 @@ impl ErrorKind {
 /// let err = PaymentError::unsupported(&ProviderId::new("paymob"), "splits");
 /// assert!(!err.is_retryable());
 /// ```
-#[derive(Clone, Error)]
+#[derive(Clone)]
 pub enum PaymentError {
     /// Input failed local validation prior to network I/O.
-    #[error("validation error: {message}")]
     ValidationError {
-        /// Human-readable validation message (free of secrets/PII).
+        /// Human-readable validation message (never interpolated verbatim in `Display`/`Debug`).
         message: String,
     },
 
     /// Missing or invalid provider/orchestrator configuration.
-    #[error("configuration error: {message}")]
     ConfigurationError {
         /// Human-readable configuration error.
         message: String,
     },
 
     /// Provider does not claim the capability required for an operation.
-    #[error("provider '{provider}' does not support operation '{operation}'")]
     Unsupported {
         /// Target provider slug.
         provider: ProviderId,
@@ -106,7 +154,6 @@ pub enum PaymentError {
     },
 
     /// Customer card or wallet payment was declined.
-    #[error("payment declined by '{provider}': {message}")]
     CardDeclined {
         /// Target provider slug.
         provider: ProviderId,
@@ -114,32 +161,29 @@ pub enum PaymentError {
         decline_code: Option<String>,
         /// Vendor advice code if available.
         advice_code: Option<String>,
-        /// Redacted human-readable message.
+        /// Provider message (never interpolated verbatim in `Display`/`Debug`).
         message: String,
     },
 
     /// Customer failed 3-D Secure authentication (distinct from merchant auth).
-    #[error("3DS authentication failed on '{provider}': {message}")]
     ThreeDsFailed {
         /// Target provider slug.
         provider: ProviderId,
         /// Vendor error code (e.g., `3ds_auth_error`).
         code: Option<String>,
-        /// Redacted human-readable message.
+        /// Provider message (never interpolated verbatim in `Display`/`Debug`).
         message: String,
     },
 
     /// Merchant credentials were rejected (HTTP 401) or wrong key scope.
-    #[error("merchant authentication failed on '{provider}': {message}")]
     AuthenticationError {
         /// Target provider slug.
         provider: ProviderId,
-        /// Redacted human-readable message.
+        /// Provider message (never interpolated verbatim in `Display`/`Debug`).
         message: String,
     },
 
     /// Upstream gateway rate-limited the request (HTTP 429).
-    #[error("rate limited by '{provider}'")]
     RateLimited {
         /// Target provider slug.
         provider: ProviderId,
@@ -148,7 +192,6 @@ pub enum PaymentError {
     },
 
     /// Upstream gateway is temporarily unavailable or timed out.
-    #[error("provider '{provider}' unavailable: {message}")]
     ProviderUnavailable {
         /// Target provider slug.
         provider: ProviderId,
@@ -156,35 +199,31 @@ pub enum PaymentError {
         http_status: Option<u16>,
         /// Whether the request may have been processed (e.g. network timeout).
         indeterminate: bool,
-        /// Redacted human-readable message.
+        /// Provider message (never interpolated verbatim in `Display`/`Debug`).
         message: String,
     },
 
     /// Webhook signature or secret-token verification failed.
-    #[error("webhook verification failed for '{provider}': {reason}")]
     WebhookVerificationFailed {
         /// Target provider slug.
         provider: ProviderId,
-        /// Non-sensitive failure reason.
+        /// Failure reason (never interpolated verbatim in `Display`/`Debug`).
         reason: String,
     },
 
     /// Another worker currently holds the idempotency lock for this key.
-    #[error("idempotency conflict on scope '{scope}'")]
     IdempotencyConflict {
         /// Namespaced idempotency scope.
         scope: String,
     },
 
     /// A `before` lifecycle hook aborted execution.
-    #[error("aborted by lifecycle hook: {reason}")]
     AbortedByHook {
-        /// Reason returned by the hook.
+        /// Reason returned by the hook (never interpolated verbatim in `Display`/`Debug`).
         reason: String,
     },
 
     /// Structured provider error preserving HTTP status and vendor code.
-    #[error("provider '{provider}' error (status={http_status:?}): {message}")]
     ProviderError {
         /// Target provider slug.
         provider: ProviderId,
@@ -192,12 +231,28 @@ pub enum PaymentError {
         http_status: Option<u16>,
         /// Vendor-specific error code.
         vendor_code: Option<String>,
-        /// Redacted message.
+        /// Provider message (never interpolated verbatim in `Display`/`Debug`).
         message: String,
-        /// Optional redacted diagnostic details (never printed in `Debug`).
-        redacted_context: Option<String>,
     },
 }
+
+impl fmt::Display for PaymentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.kind().summary())?;
+        if let Some(provider) = self.provider() {
+            write!(f, " (provider={provider})")?;
+        }
+        if let Some(op) = self.operation() {
+            write!(f, " (operation={op})")?;
+        }
+        if let Some(status) = self.http_status() {
+            write!(f, " (status={status})")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PaymentError {}
 
 impl fmt::Debug for PaymentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -234,46 +289,88 @@ impl PaymentError {
         }
     }
 
-    /// Returns the coarse [`ErrorKind`] for telemetry and classification.
-    pub fn kind(&self) -> ErrorKind {
+    fn client_kind(&self) -> Option<ErrorKind> {
         match self {
-            Self::ValidationError { .. } => ErrorKind::Validation,
-            Self::ConfigurationError { .. } => ErrorKind::Configuration,
-            Self::Unsupported { .. } => ErrorKind::Unsupported,
-            Self::CardDeclined { .. } => ErrorKind::CardDeclined,
-            Self::ThreeDsFailed { .. } => ErrorKind::ThreeDsFailed,
-            Self::AuthenticationError { .. } => ErrorKind::Authentication,
+            Self::ValidationError { .. } => Some(ErrorKind::Validation),
+            Self::ConfigurationError { .. } => Some(ErrorKind::Configuration),
+            Self::Unsupported { .. } => Some(ErrorKind::Unsupported),
+            Self::AbortedByHook { .. } => Some(ErrorKind::AbortedByHook),
+            _ => None,
+        }
+    }
+
+    fn payment_flow_kind(&self) -> Option<ErrorKind> {
+        match self {
+            Self::CardDeclined { .. } => Some(ErrorKind::CardDeclined),
+            Self::ThreeDsFailed { .. } => Some(ErrorKind::ThreeDsFailed),
+            Self::AuthenticationError { .. } => Some(ErrorKind::Authentication),
+            Self::WebhookVerificationFailed { .. } => Some(ErrorKind::WebhookVerificationFailed),
+            _ => None,
+        }
+    }
+
+    fn transport_kind(&self) -> ErrorKind {
+        match self {
             Self::RateLimited { .. } => ErrorKind::RateLimited,
             Self::ProviderUnavailable { .. } => ErrorKind::ProviderUnavailable,
-            Self::WebhookVerificationFailed { .. } => ErrorKind::WebhookVerificationFailed,
             Self::IdempotencyConflict { .. } => ErrorKind::IdempotencyConflict,
-            Self::AbortedByHook { .. } => ErrorKind::AbortedByHook,
-            Self::ProviderError { .. } => ErrorKind::Provider,
+            _ => ErrorKind::Provider,
+        }
+    }
+
+    /// Returns the coarse [`ErrorKind`] for telemetry and classification.
+    pub fn kind(&self) -> ErrorKind {
+        self.client_kind()
+            .or_else(|| self.payment_flow_kind())
+            .unwrap_or_else(|| self.transport_kind())
+    }
+
+    fn primary_provider(&self) -> Option<&ProviderId> {
+        match self {
+            Self::Unsupported { provider, .. } => Some(provider),
+            Self::CardDeclined { provider, .. } => Some(provider),
+            Self::ThreeDsFailed { provider, .. } => Some(provider),
+            Self::AuthenticationError { provider, .. } => Some(provider),
+            _ => None,
+        }
+    }
+
+    fn secondary_provider(&self) -> Option<&ProviderId> {
+        match self {
+            Self::RateLimited { provider, .. } => Some(provider),
+            Self::ProviderUnavailable { provider, .. } => Some(provider),
+            Self::WebhookVerificationFailed { provider, .. } => Some(provider),
+            Self::ProviderError { provider, .. } => Some(provider),
+            _ => None,
+        }
+    }
+
+    /// Returns the associated [`ProviderId`] if this error originated from a provider.
+    pub fn provider(&self) -> Option<&ProviderId> {
+        self.primary_provider()
+            .or_else(|| self.secondary_provider())
+    }
+
+    fn operation(&self) -> Option<&str> {
+        match self {
+            Self::Unsupported { operation, .. } => Some(operation.as_str()),
+            _ => None,
         }
     }
 
     /// Returns `true` if the operation may safely be retried with the same
     /// idempotency key.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::RateLimited { .. }
-                | Self::ProviderUnavailable { .. }
-                | Self::IdempotencyConflict { .. }
-        )
+        RETRYABLE_KINDS.contains(&self.kind())
     }
 
     /// Returns `true` if this error represents a definitive local or 4xx client
     /// rejection where an idempotency lock may be safely released.
     pub fn is_definitive_client_rejection(&self) -> bool {
-        matches!(
-            self,
-            Self::ValidationError { .. }
-                | Self::ConfigurationError { .. }
-                | Self::Unsupported { .. }
-                | Self::AuthenticationError { .. }
-                | Self::AbortedByHook { .. }
-        ) || matches!(self.http_status(), Some(400..=499) if self.http_status() != Some(429))
+        if DEFINITIVE_KINDS.contains(&self.kind()) {
+            return true;
+        }
+        matches!(self.http_status(), Some(400..=428 | 430..=499))
     }
 
     /// Returns the upstream HTTP status code if available.
@@ -281,8 +378,8 @@ impl PaymentError {
         match self {
             Self::RateLimited { .. } => Some(429),
             Self::AuthenticationError { .. } => Some(401),
-            Self::ProviderUnavailable { http_status, .. }
-            | Self::ProviderError { http_status, .. } => *http_status,
+            Self::ProviderUnavailable { http_status, .. } => *http_status,
+            Self::ProviderError { http_status, .. } => *http_status,
             _ => None,
         }
     }
@@ -301,17 +398,165 @@ mod tests {
     use super::*;
 
     #[test]
-    fn debug_redacts_secret_payloads() {
-        let err = PaymentError::ProviderError {
+    fn display_and_debug_redact_secret_payloads() {
+        let canaries = [
+            "sk_live_CANARY_SECRET_999",
+            "whsec_CANARY_WEBHOOK_888",
+            "egypt_sk_CANARY_PAYMOB_777",
+            "4111111111111111",
+        ];
+        let errors = [
+            PaymentError::ProviderError {
+                provider: ProviderId::new("stripe"),
+                http_status: Some(500),
+                vendor_code: Some("api_error".into()),
+                message: canaries[0].into(),
+            },
+            PaymentError::WebhookVerificationFailed {
+                provider: ProviderId::new("stripe"),
+                reason: canaries[1].into(),
+            },
+            PaymentError::AuthenticationError {
+                provider: ProviderId::new("paymob"),
+                message: canaries[2].into(),
+            },
+            PaymentError::CardDeclined {
+                provider: ProviderId::new("moyasar"),
+                decline_code: Some("insufficient_funds".into()),
+                advice_code: None,
+                message: canaries[3].into(),
+            },
+            PaymentError::ValidationError {
+                message: canaries[0].into(),
+            },
+            PaymentError::ConfigurationError {
+                message: canaries[1].into(),
+            },
+            PaymentError::ProviderUnavailable {
+                provider: ProviderId::new("paymob"),
+                http_status: Some(503),
+                indeterminate: true,
+                message: canaries[2].into(),
+            },
+            PaymentError::AbortedByHook {
+                reason: canaries[3].into(),
+            },
+        ];
+
+        for err in &errors {
+            let display = format!("{err}");
+            let debug = format!("{err:?}");
+            for canary in &canaries {
+                assert!(!display.contains(canary));
+                assert!(!debug.contains(canary));
+            }
+            assert!(debug.contains("[REDACTED]"));
+        }
+    }
+
+    #[test]
+    fn all_variants_classification_and_accessors() {
+        let val = PaymentError::validation("bad input");
+        assert_eq!(val.kind(), ErrorKind::Validation);
+        assert!(val.is_definitive_client_rejection());
+        assert!(!val.is_retryable());
+        assert_eq!(val.decline_code(), None);
+        assert_eq!(val.provider(), None);
+
+        let cfg = PaymentError::configuration("missing key");
+        assert_eq!(cfg.kind(), ErrorKind::Configuration);
+        assert!(cfg.is_definitive_client_rejection());
+
+        let unsup = PaymentError::unsupported(&ProviderId::new("paymob"), "splits");
+        assert_eq!(unsup.kind(), ErrorKind::Unsupported);
+        assert!(unsup.is_definitive_client_rejection());
+        assert!(format!("{unsup}").contains("provider=paymob"));
+        assert!(format!("{unsup}").contains("operation=splits"));
+
+        let declined = PaymentError::CardDeclined {
+            provider: ProviderId::new("moyasar"),
+            decline_code: Some("insufficient_funds".into()),
+            advice_code: Some("retry_later".into()),
+            message: "declined".into(),
+        };
+        assert_eq!(declined.kind(), ErrorKind::CardDeclined);
+        assert_eq!(declined.decline_code(), Some("insufficient_funds"));
+        assert!(!declined.is_retryable());
+        assert!(!declined.is_definitive_client_rejection());
+
+        let auth = PaymentError::AuthenticationError {
+            provider: ProviderId::new("stripe"),
+            message: "bad key".into(),
+        };
+        assert_eq!(auth.kind(), ErrorKind::Authentication);
+        assert_eq!(auth.http_status(), Some(401));
+        assert!(auth.is_definitive_client_rejection());
+
+        let unavail = PaymentError::ProviderUnavailable {
+            provider: ProviderId::new("paymob"),
+            http_status: Some(503),
+            indeterminate: true,
+            message: "upstream down".into(),
+        };
+        assert_eq!(unavail.kind(), ErrorKind::ProviderUnavailable);
+        assert_eq!(unavail.http_status(), Some(503));
+        assert!(unavail.is_retryable());
+        assert!(!unavail.is_definitive_client_rejection());
+
+        let wh = PaymentError::WebhookVerificationFailed {
+            provider: ProviderId::new("stripe"),
+            reason: "bad sig".into(),
+        };
+        assert_eq!(wh.kind(), ErrorKind::WebhookVerificationFailed);
+        assert!(!wh.is_retryable());
+
+        let conflict = PaymentError::IdempotencyConflict {
+            scope: "refund:1".into(),
+        };
+        assert_eq!(conflict.kind(), ErrorKind::IdempotencyConflict);
+        assert!(conflict.is_retryable());
+        assert!(!conflict.is_definitive_client_rejection());
+
+        let aborted = PaymentError::AbortedByHook {
+            reason: "blocked".into(),
+        };
+        assert_eq!(aborted.kind(), ErrorKind::AbortedByHook);
+        assert!(aborted.is_definitive_client_rejection());
+    }
+
+    #[test]
+    fn definitive_client_rejection_http_status_boundaries() {
+        let p400 = PaymentError::ProviderError {
+            provider: ProviderId::new("stripe"),
+            http_status: Some(400),
+            vendor_code: None,
+            message: "bad request".into(),
+        };
+        assert!(p400.is_definitive_client_rejection());
+
+        let p422 = PaymentError::ProviderError {
+            provider: ProviderId::new("stripe"),
+            http_status: Some(422),
+            vendor_code: None,
+            message: "unprocessable".into(),
+        };
+        assert!(p422.is_definitive_client_rejection());
+
+        let p429 = PaymentError::ProviderError {
+            provider: ProviderId::new("stripe"),
+            http_status: Some(429),
+            vendor_code: None,
+            message: "too many requests".into(),
+        };
+        assert!(!p429.is_definitive_client_rejection());
+
+        let p500 = PaymentError::ProviderError {
             provider: ProviderId::new("stripe"),
             http_status: Some(500),
-            vendor_code: Some("api_error".into()),
-            message: "sk_live_CANARY_SECRET_999".into(),
-            redacted_context: Some("whsec_CANARY_SECRET_999".into()),
+            vendor_code: None,
+            message: "server error".into(),
         };
-        let debug_str = format!("{err:?}");
-        assert!(!debug_str.contains("CANARY_SECRET_999"));
-        assert!(debug_str.contains("[REDACTED]"));
+        assert!(!p500.is_definitive_client_rejection());
     }
 
     #[test]

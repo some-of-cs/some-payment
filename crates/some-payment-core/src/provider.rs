@@ -104,11 +104,13 @@ pub trait PaymentProvider: Send + Sync + fmt::Debug {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use super::*;
     use crate::error::ErrorKind;
     use crate::money::Money;
+    use crate::requests::CaptureMode;
 
     #[derive(Debug)]
     struct DummyProvider(ProviderId);
@@ -148,6 +150,17 @@ mod tests {
         }
     }
 
+    fn assert_unsupported(err: PaymentError, expected_provider: &str, expected_op: &str) {
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert!(matches!(
+            err,
+            PaymentError::Unsupported {
+                ref provider,
+                ref operation,
+            } if provider.as_str() == expected_provider && operation == expected_op
+        ));
+    }
+
     #[tokio::test]
     async fn default_optional_methods_fail_closed_as_unsupported() {
         let provider: Arc<dyn PaymentProvider> = Arc::new(DummyProvider(ProviderId::new("tap")));
@@ -155,6 +168,24 @@ mod tests {
             .payment_id("pay_1")
             .build()
             .unwrap();
+
+        let checkout_err = provider
+            .create_checkout(&CheckoutSessionRequest {
+                provider_id: None,
+                money: Money::new(100, "KWD").unwrap(),
+                order_id: "ORD-1".into(),
+                success_url: "https://example.com/ok".into(),
+                cancel_url: None,
+                description: None,
+                customer_email: None,
+                customer_phone: None,
+                capture_mode: CaptureMode::Automatic,
+                idempotency_key: None,
+                metadata: BTreeMap::new(),
+            })
+            .await
+            .unwrap_err();
+        assert_unsupported(checkout_err, "tap", "create_checkout");
 
         let cap_err = provider
             .capture(&CaptureRequest {
@@ -164,7 +195,7 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert_eq!(cap_err.kind(), ErrorKind::Unsupported);
+        assert_unsupported(cap_err, "tap", "capture");
 
         let void_err = provider
             .void_payment(&VoidRequest {
@@ -174,7 +205,7 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert_eq!(void_err.kind(), ErrorKind::Unsupported);
+        assert_unsupported(void_err, "tap", "void_payment");
 
         let ref_err = provider
             .refund(&RefundRequest {
@@ -185,6 +216,6 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert_eq!(ref_err.kind(), ErrorKind::Unsupported);
+        assert_unsupported(ref_err, "tap", "refund");
     }
 }

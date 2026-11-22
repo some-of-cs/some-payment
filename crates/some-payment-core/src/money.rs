@@ -193,6 +193,8 @@ mod tests {
         let sar = Money::new(15_000, "sar").unwrap();
         assert_eq!(sar.amount(), 15_000);
         assert_eq!(sar.currency().as_str(), "SAR");
+        assert_eq!(sar.currency().to_lowercase(), "sar");
+        assert_eq!(sar.currency().to_string(), "SAR");
         assert_eq!(sar.currency().scale(), MinorUnitScale::Two);
 
         let jpy = Money::new(500, "JPY").unwrap();
@@ -200,6 +202,25 @@ mod tests {
 
         let kwd = Money::new(1_250, "kwd").unwrap();
         assert_eq!(kwd.currency().scale(), MinorUnitScale::Three);
+    }
+
+    #[test]
+    fn checked_add_and_checked_sub_behavior() {
+        let a = Money::new(1_000, "USD").unwrap();
+        let b = Money::new(400, "USD").unwrap();
+        let eur = Money::new(400, "EUR").unwrap();
+
+        let sum = a.checked_add(&b).unwrap();
+        assert_eq!(sum.amount(), 1_400);
+        assert_eq!(sum.currency().as_str(), "USD");
+
+        let diff = a.checked_sub(&b).unwrap();
+        assert_eq!(diff.amount(), 600);
+        assert_eq!(diff.currency().as_str(), "USD");
+
+        assert!(a.checked_sub(&a).is_err());
+        assert!(b.checked_sub(&a).is_err());
+        assert!(a.checked_sub(&eur).is_err());
     }
 
     #[test]
