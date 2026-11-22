@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    ".",
     "crates/some-payment-core",
 ]
 exclude = [".worktrees"]
@@ -13,3 +14,30 @@ authors = ["Maher Aladdin", "Some(CS)"]
 license = "Apache-2.0"
 repository = "https://github.com/some-of-cs/some-payment"
 homepage = "https://github.com/some-of-cs/some-payment"
+
+[package]
+name = "some-payment"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Provider-agnostic Rust payment orchestrator, registry, lifecycle hooks, and deterministic routing engine."
+keywords = ["payments", "fintech", "orchestrator", "routing", "gateway"]
+categories = ["finance", "api-bindings"]
+
+[features]
+default = ["country-router", "composable-pipelines"]
+country-router = []
+composable-pipelines = []
+
+[dependencies]
+async-trait = "0.1"
+some-payment-core = { path = "crates/some-payment-core" }
+tracing = "0.1"
+
+[dev-dependencies]
+serde_json = "1.0"
+tokio = { version = "1.44", features = ["macros", "rt"] }
