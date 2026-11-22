@@ -196,7 +196,8 @@ impl IdempotencyBoundary {
     ) -> Result<T, PaymentError> {
         let key_fingerprint = fingerprint_key(entry.scope, entry.key);
         if err.is_definitive_client_rejection() {
-            self.release_after_client_rejection(entry, &key_fingerprint).await;
+            self.release_after_client_rejection(entry, &key_fingerprint)
+                .await;
             return Err(err);
         }
         tracing::warn!(
@@ -227,10 +228,14 @@ impl IdempotencyBoundary {
 
 fn validate_inputs(scope: &str, key: &str) -> Result<(), PaymentError> {
     if scope.trim().is_empty() {
-        return Err(PaymentError::validation("idempotency scope must not be empty"));
+        return Err(PaymentError::validation(
+            "idempotency scope must not be empty",
+        ));
     }
     if key.trim().is_empty() {
-        return Err(PaymentError::validation("idempotency key must not be empty"));
+        return Err(PaymentError::validation(
+            "idempotency key must not be empty",
+        ));
     }
     Ok(())
 }
