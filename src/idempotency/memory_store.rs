@@ -158,9 +158,9 @@ impl InMemoryIdempotencyStore {
     }
 
     fn lock_entries(&self) -> Result<MutexGuard<'_, EntryMap>, PaymentError> {
-        self.entries.lock().map_err(|_| {
-            PaymentError::configuration("in-memory idempotency store mutex poisoned")
-        })
+        self.entries
+            .lock()
+            .map_err(|_| PaymentError::configuration("in-memory idempotency store mutex poisoned"))
     }
 
     fn reserve_at(
