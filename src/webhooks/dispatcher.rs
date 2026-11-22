@@ -446,8 +446,8 @@ fn is_scrubbed_secret_value(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashMap, HashSet};
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use serde_json::{Map, Value, json};
@@ -495,10 +495,7 @@ mod tests {
             Err(PaymentError::unsupported(&self.id, "create_payment"))
         }
 
-        async fn get_payment(
-            &self,
-            _: &ProviderReference,
-        ) -> Result<PaymentResult, PaymentError> {
+        async fn get_payment(&self, _: &ProviderReference) -> Result<PaymentResult, PaymentError> {
             Err(PaymentError::unsupported(&self.id, "get_payment"))
         }
 
@@ -652,10 +649,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(invalid_err.kind(), ErrorKind::Validation);
 
-        let unknown_err = dispatcher
-            .handle_webhook("stripe", &raw)
-            .await
-            .unwrap_err();
+        let unknown_err = dispatcher.handle_webhook("stripe", &raw).await.unwrap_err();
         assert_eq!(unknown_err.kind(), ErrorKind::Configuration);
         assert_eq!(verify_calls.load(Ordering::SeqCst), 0);
         assert_eq!(dedup_calls.load(Ordering::SeqCst), 0);
@@ -745,7 +739,10 @@ mod tests {
             let (dispatcher, verify_calls, dedup_calls) =
                 build_dispatcher("moyasar", MockOutcome::Verified(event));
 
-            let err = dispatcher.handle_webhook("moyasar", &raw).await.unwrap_err();
+            let err = dispatcher
+                .handle_webhook("moyasar", &raw)
+                .await
+                .unwrap_err();
             assert_eq!(err.kind(), ErrorKind::WebhookVerificationFailed);
             assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
             assert_eq!(dedup_calls.load(Ordering::SeqCst), 0);
@@ -775,8 +772,7 @@ mod tests {
             deep = json!({ "a": deep });
         }
         let event = sample_event("stripe", "evt_deep", deep);
-        let (dispatcher, _, dedup_calls) =
-            build_dispatcher("stripe", MockOutcome::Verified(event));
+        let (dispatcher, _, dedup_calls) = build_dispatcher("stripe", MockOutcome::Verified(event));
         let raw = raw_request_with_body(b"{}".to_vec());
 
         let err = dispatcher.handle_webhook("stripe", &raw).await.unwrap_err();
@@ -787,8 +783,7 @@ mod tests {
     #[tokio::test]
     async fn empty_event_id_rejected_before_dedup() {
         let event = sample_event("stripe", "   ", json!({}));
-        let (dispatcher, _, dedup_calls) =
-            build_dispatcher("stripe", MockOutcome::Verified(event));
+        let (dispatcher, _, dedup_calls) = build_dispatcher("stripe", MockOutcome::Verified(event));
         let raw = raw_request_with_body(b"{}".to_vec());
 
         let err = dispatcher.handle_webhook("stripe", &raw).await.unwrap_err();
