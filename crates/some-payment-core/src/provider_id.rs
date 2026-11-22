@@ -32,8 +32,13 @@ impl ProviderId {
     /// whitespace and ASCII case.
     ///
     /// Prefer [`ProviderId::try_new`] for untrusted external inputs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is not a valid provider slug (must be 1..=64 ASCII
+    /// characters starting with `[a-z0-9]` and containing only `[a-z0-9_-]`).
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into().trim().to_ascii_lowercase())
+        Self::try_new(id.into()).expect("invalid static ProviderId slug")
     }
 
     /// Validates and constructs a [`ProviderId`] from untrusted input.
@@ -52,6 +57,10 @@ impl ProviderId {
     }
 }
 
+fn is_valid_slug_byte(b: u8) -> bool {
+    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_')
+}
+
 fn validate_slug(slug: &str) -> Result<(), PaymentError> {
     if slug.is_empty() || slug.len() > MAX_PROVIDER_ID_LEN {
         return Err(PaymentError::validation(
@@ -64,10 +73,7 @@ fn validate_slug(slug: &str) -> Result<(), PaymentError> {
             "provider_id must start with an ASCII letter or digit",
         ));
     }
-    let valid_chars = bytes
-        .iter()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-' || *b == b'_');
-    if !valid_chars {
+    if !bytes.iter().copied().all(is_valid_slug_byte) {
         return Err(PaymentError::validation(
             "provider_id may only contain lowercase ASCII letters, digits, '-' or '_'",
         ));
@@ -110,17 +116,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_valid_slugs() {
+    fn normalizes_valid_slugs_and_exact_boundary() {
         let id = ProviderId::try_new("  Stripe ").unwrap();
         assert_eq!(id.as_str(), "stripe");
         let custom = ProviderId::try_new("tap_payments-v2").unwrap();
         assert_eq!(custom.to_string(), "tap_payments-v2");
+        let from_new = ProviderId::new("  Paymob ");
+        assert_eq!(from_new.as_str(), "paymob");
+        let from_try = ProviderId::try_from("moyasar").unwrap();
+        assert_eq!(from_try.as_str(), "moyasar");
+        assert!(ProviderId::try_from("../bad").is_err());
+
+        let exact_max = "a".repeat(MAX_PROVIDER_ID_LEN);
+        assert_eq!(ProviderId::try_new(&exact_max).unwrap().as_str(), exact_max);
     }
 
     #[test]
-    fn rejects_empty_traversal_and_oversized_slugs() {
+    #[should_panic(expected = "invalid static ProviderId slug")]
+    fn new_panics_on_invalid_slug() {
+        let _ = ProviderId::new("../evil");
+    }
+
+    #[test]
+    fn rejects_empty_leading_punctuation_traversal_and_oversized_slugs() {
         assert!(ProviderId::try_new("").is_err());
         assert!(ProviderId::try_new("   ").is_err());
+        assert!(ProviderId::try_new("-stripe").is_err());
+        assert!(ProviderId::try_new("_stripe").is_err());
         assert!(ProviderId::try_new("../stripe").is_err());
         assert!(ProviderId::try_new("bad slug!").is_err());
         assert!(ProviderId::try_new("a".repeat(65)).is_err());
