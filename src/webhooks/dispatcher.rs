@@ -89,6 +89,7 @@ pub trait WebhookDedupRecorder: Send + Sync {
 ///
 /// Sensitive fields inside [`VerificationChallenge`] remain redacted in [`fmt::Debug`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum WebhookOutcome {
     /// Verified, secret-scrubbed, newly recorded webhook event ready for fulfillment.
     Processed(NormalizedWebhookEvent),
@@ -459,6 +460,7 @@ mod tests {
 
     use super::*;
 
+    #[allow(clippy::large_enum_variant)]
     enum MockOutcome {
         Verified(NormalizedWebhookEvent),
         VerifyFailed,
