@@ -345,8 +345,22 @@ mod tests {
             .with_hook(hook);
         let rendered = format!("{builder:?}");
         assert!(rendered.contains("PaymentOrchestratorBuilder"));
-        assert!(rendered.contains("provider_ids: ["alpha", "beta"]"));
+        assert!(rendered.contains(r#"provider_ids: ["alpha", "beta"]"#));
         assert!(rendered.contains("hook_count: 1"));
         assert!(rendered.contains("has_route_resolver: false"));
+    }
+
+    #[test]
+    fn with_route_resolver_sets_debug_flag_and_builds_cleanly() {
+        let resolver: RouteResolver = Arc::new(|reg, _explicit, _currency, _country, _caps| {
+            reg.require(&ProviderId::new("alpha"))
+        });
+        let builder = PaymentOrchestrator::builder()
+            .register(mock_provider("alpha"))
+            .expect("registration succeeds")
+            .with_route_resolver(resolver);
+        let rendered = format!("{builder:?}");
+        assert!(rendered.contains("has_route_resolver: true"));
+        assert!(builder.build().is_ok());
     }
 }
