@@ -345,7 +345,7 @@ fn is_valid_ipv6_authority(authority: &str) -> bool {
     let Some((host, suffix)) = rest.split_once(']') else {
         return false;
     };
-    if host.is_empty() || host.contains('[') {
+    if host.parse::<std::net::Ipv6Addr>().is_err() {
         return false;
     }
     suffix.is_empty() || suffix.strip_prefix(':').is_some_and(is_valid_port)
@@ -715,6 +715,7 @@ mod tests {
             "https://:",
             "https://evil.com\\@trusted.com",
             "https://example.com/\u{202E}cb",
+            "https://[not-an-ip]/cb",
         ];
         for url in bad_urls {
             let mut req = CreatePaymentRequest::new(money.clone(), "ORD-URL-ADV");
