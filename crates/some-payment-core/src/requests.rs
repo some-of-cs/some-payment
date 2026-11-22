@@ -280,8 +280,7 @@ impl RefundRequest {
 }
 
 fn validate_order_id(order_id: &str) -> Result<(), PaymentError> {
-    let trimmed = order_id.trim();
-    if trimmed.is_empty() || trimmed.len() > MAX_ORDER_ID_LEN {
+    if order_id.trim().is_empty() || order_id.len() > MAX_ORDER_ID_LEN {
         return Err(PaymentError::validation(
             "order_id must be 1..=255 non-whitespace bytes",
         ));
@@ -293,8 +292,7 @@ fn validate_optional_idempotency_key(key: Option<&str>) -> Result<(), PaymentErr
     let Some(raw) = key else {
         return Ok(());
     };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.len() > MAX_IDEMPOTENCY_KEY_LEN {
+    if raw.trim().is_empty() || raw.len() > MAX_IDEMPOTENCY_KEY_LEN {
         return Err(PaymentError::validation(
             "idempotency_key must be 1..=255 non-whitespace bytes",
         ));
@@ -306,9 +304,7 @@ fn validate_optional_country(country: Option<&str>) -> Result<(), PaymentError> 
     let Some(raw) = country else {
         return Ok(());
     };
-    let trimmed = raw.trim();
-    let is_two_ascii_letters =
-        trimmed.len() == 2 && trimmed.bytes().all(|b| b.is_ascii_alphabetic());
+    let is_two_ascii_letters = raw.len() == 2 && raw.bytes().all(|b| b.is_ascii_alphabetic());
     if !is_two_ascii_letters {
         return Err(PaymentError::validation(
             "buyer_country must be a 2-letter ISO-3166-1 alpha-2 ASCII code",
@@ -317,15 +313,17 @@ fn validate_optional_country(country: Option<&str>) -> Result<(), PaymentError> 
     Ok(())
 }
 
+fn has_valid_host_and_chars(rest: &str) -> bool {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let has_bad_char = rest.chars().any(|ch| ch.is_whitespace() || ch.is_ascii_control());
+    !authority.is_empty() && !has_bad_char
+}
+
 fn validate_http_url(url: &str, field: &str) -> Result<(), PaymentError> {
-    let trimmed = url.trim();
-    let has_scheme = trimmed.starts_with("https://") || trimmed.starts_with("http://");
-    let has_host = trimmed
-        .split_once("://")
-        .is_some_and(|(_, rest)| !rest.is_empty());
-    if !has_scheme || !has_host {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"));
+    if !rest.is_some_and(has_valid_host_and_chars) {
         return Err(PaymentError::validation(format!(
-            "{field} must be a non-empty http:// or https:// URL"
+            "{field} must be a valid http:// or https:// URL"
         )));
     }
     Ok(())
@@ -605,5 +603,46 @@ mod tests {
             idempotency_key: None,
         };
         assert!(refund_ok.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_padded_order_id_idempotency_key_and_country() {
+        let money = Money::new(1_000, "SAR").unwrap();
+        let padded_order = format!("{}O", " ".repeat(256));
+        let padded_order_req = CreatePaymentRequest::new(money.clone(), padded_order);
+        assert!(padded_order_req.validate().is_err());
+
+        let key = format!("{}K", " ".repeat(256));
+        let req = CreatePaymentRequest::new(money.clone(), "ORD-1").with_idempotency_key(&key);
+        assert!(req.validate().is_err());
+
+        let refund_req = RefundRequest {
+            reference: sample_reference(),
+            amount: Some(money.clone()),
+            reason: None,
+            idempotency_key: Some(key),
+        };
+        assert!(refund_req.validate().is_err());
+
+        let mut country_req = CreatePaymentRequest::new(money, "ORD-2");
+        country_req.buyer_country = Some(" SA ".into());
+        assert!(country_req.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_hostless_whitespace_and_control_char_urls() {
+        let money = Money::new(1_000, "USD").unwrap();
+        let bad_urls = [
+            "https://?next=done",
+            "https:///path",
+            "https://#frag",
+            "https://example.com/a b",
+            "https://example.com/a\nb",
+        ];
+        for url in bad_urls {
+            let mut req = CreatePaymentRequest::new(money.clone(), "ORD-URL");
+            req.callback_url = Some(url.into());
+            assert!(req.validate().is_err(), "expected error for {url}");
+        }
     }
 }
