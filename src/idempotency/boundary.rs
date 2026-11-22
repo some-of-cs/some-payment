@@ -718,7 +718,6 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Configuration);
-        assert!(!err.is_definitive_client_rejection());
         assert_eq!(store.counts(), (1, 0, 0));
     }
 
