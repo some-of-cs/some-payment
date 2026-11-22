@@ -5,13 +5,18 @@
 //! fails with an indeterminate 5xx response or network timeout, the idempotency
 //! lock MUST remain held until authoritative state is fetched from the provider.
 //! [`reconcile_indeterminate_mutation`] queries [`PaymentProvider::get_payment`]
-//! and either completes the lock with a redacted [`PaymentResult`], releases the
-//! lock when the mutation is confirmed absent, or retains the lock when the
-//! payment is still in a transitional state.
+//! and either completes the lock with a replay-compatible payload
+//! ([`RefundResult`] for [`ReconciliationKind::Refund`], or redacted
+//! [`PaymentResult`] for [`ReconciliationKind::Capture`] and
+//! [`ReconciliationKind::Void`]), releases the lock when the mutation is
+//! confirmed absent, or retains the lock when the payment is still in a
+//! transitional state.
+
+use std::fmt;
 
 use some_payment_core::{
-    IdempotencyEntry, IdempotencyStore, NextAction, PaymentError, PaymentProvider, PaymentResult,
-    PaymentStatus, ProviderReference,
+    IdempotencyEntry, IdempotencyStore, Money, NextAction, PaymentError, PaymentProvider,
+    PaymentResult, PaymentStatus, ProviderReference, RefundResult, RefundStatus,
 };
 
 /// Mutation kind being reconciled against authoritative provider state.
@@ -35,6 +40,13 @@ use some_payment_core::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReconciliationKind {
     /// Reconcile an indeterminate refund mutation.
+    ///
+    /// # Single-In-Flight Assumption
+    ///
+    /// Cumulative `expected_min_refunded_amount` threshold matching assumes at
+    /// most one refund mutation is in flight per payment at a time. Callers
+    /// running concurrent partial refunds against the same payment should
+    /// coordinate refund-level provider IDs externally.
     Refund {
         /// Minimum cumulative `refunded_amount` (in minor units) proving the refund executed.
         expected_min_refunded_amount: u64,
@@ -49,6 +61,9 @@ pub enum ReconciliationKind {
 }
 
 /// Input descriptor for reconciling an indeterminate idempotency lock.
+///
+/// Implements a manual [`fmt::Debug`] that redacts `entry.key` as
+/// `"[REDACTED]"` so raw idempotency keys never leak into logs or traces.
 ///
 /// # Examples
 ///
@@ -71,8 +86,9 @@ pub enum ReconciliationKind {
 ///
 /// assert_eq!(request.entry.scope, "moyasar:refund");
 /// assert_eq!(request.reference.payment_id(), Some("pay_42"));
+/// assert!(format!("{request:?}").contains("[REDACTED]"));
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ReconciliationRequest<'a> {
     /// Locked idempotency entry awaiting resolution.
     pub entry: IdempotencyEntry<'a>,
@@ -94,6 +110,18 @@ impl<'a> ReconciliationRequest<'a> {
             reference,
             kind,
         }
+    }
+}
+
+impl fmt::Debug for ReconciliationRequest<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReconciliationRequest")
+            .field("scope", &self.entry.scope)
+            .field("key", &"[REDACTED]")
+            .field("ttl_secs", &self.entry.ttl_secs)
+            .field("reference", &self.reference)
+            .field("kind", &self.kind)
+            .finish()
     }
 }
 
@@ -139,14 +167,23 @@ enum ReconciliationDecision {
     RetainLock,
 }
 
+struct ReconciliationContext<'a> {
+    provider: &'a dyn PaymentProvider,
+    store: &'a dyn IdempotencyStore,
+    request: &'a ReconciliationRequest<'a>,
+}
+
 /// Reconciles an indeterminate idempotency lock by fetching authoritative payment
 /// state via [`PaymentProvider::get_payment`].
 ///
 /// Depending on [`ReconciliationKind`] and the fetched [`PaymentResult`]:
 ///
-/// - Calls [`IdempotencyStore::complete`] with a secret-redacted serialized
-///   [`PaymentResult`] and returns [`ReconciliationOutcome::Completed`] when the
-///   mutation is verified executed.
+/// - Calls [`IdempotencyStore::complete`] with a replay-compatible serialized
+///   payload ([`RefundResult`] for [`ReconciliationKind::Refund`], or a
+///   secret-redacted [`PaymentResult`] for [`ReconciliationKind::Capture`] and
+///   [`ReconciliationKind::Void`]) and returns
+///   [`ReconciliationOutcome::Completed`] when the mutation is verified
+///   executed.
 /// - Calls [`IdempotencyStore::release`] and returns
 ///   [`ReconciliationOutcome::Released`] when the gateway state confirms the
 ///   mutation did not execute.
@@ -247,68 +284,65 @@ pub async fn reconcile_indeterminate_mutation(
 ) -> Result<ReconciliationOutcome, PaymentError> {
     let payment = provider.get_payment(request.reference).await?;
     let decision = evaluate_decision(&payment, request.kind);
-    apply_decision(provider, store, request, payment, decision).await
+    let ctx = ReconciliationContext {
+        provider,
+        store,
+        request,
+    };
+    apply_decision(&ctx, payment, decision).await
 }
 
 async fn apply_decision(
-    provider: &dyn PaymentProvider,
-    store: &dyn IdempotencyStore,
-    request: &ReconciliationRequest<'_>,
+    ctx: &ReconciliationContext<'_>,
     payment: PaymentResult,
     decision: ReconciliationDecision,
 ) -> Result<ReconciliationOutcome, PaymentError> {
-    match decision {
+    let status = payment.status;
+    let outcome = match decision {
         ReconciliationDecision::Complete => {
-            complete_reconciliation(provider, store, request, payment).await
+            let payload = serialize_reconciled_payload(ctx.request, &payment)?;
+            ctx.store.complete(&ctx.request.entry, &payload).await?;
+            ReconciliationOutcome::Completed(payment)
         }
         ReconciliationDecision::Release => {
-            release_reconciliation(provider, store, request, payment).await
+            ctx.store
+                .release(ctx.request.entry.scope, ctx.request.entry.key)
+                .await?;
+            ReconciliationOutcome::Released(payment)
         }
-        ReconciliationDecision::RetainLock => {
-            tracing::warn!(
-                provider = provider.id().as_str(),
-                scope = request.entry.scope,
-                status = ?payment.status,
-                "reconciliation observed transitional payment state; retaining idempotency lock"
-            );
-            Ok(ReconciliationOutcome::StillIndeterminate(payment))
-        }
+        ReconciliationDecision::RetainLock => ReconciliationOutcome::StillIndeterminate(payment),
+    };
+    log_decision(ctx, status, decision);
+    Ok(outcome)
+}
+
+fn log_decision(
+    ctx: &ReconciliationContext<'_>,
+    status: PaymentStatus,
+    decision: ReconciliationDecision,
+) {
+    let provider = ctx.provider.id().as_str();
+    let scope = ctx.request.entry.scope;
+    match decision {
+        ReconciliationDecision::Complete => tracing::info!(
+            provider,
+            scope,
+            ?status,
+            "reconciliation verified mutation execution; idempotency lock completed"
+        ),
+        ReconciliationDecision::Release => tracing::info!(
+            provider,
+            scope,
+            ?status,
+            "reconciliation confirmed mutation did not execute; idempotency lock released"
+        ),
+        ReconciliationDecision::RetainLock => tracing::warn!(
+            provider,
+            scope,
+            ?status,
+            "reconciliation observed transitional payment state; retaining idempotency lock"
+        ),
     }
-}
-
-async fn complete_reconciliation(
-    provider: &dyn PaymentProvider,
-    store: &dyn IdempotencyStore,
-    request: &ReconciliationRequest<'_>,
-    payment: PaymentResult,
-) -> Result<ReconciliationOutcome, PaymentError> {
-    let payload = serialize_cached_payment(&payment)?;
-    store.complete(&request.entry, &payload).await?;
-    tracing::info!(
-        provider = provider.id().as_str(),
-        scope = request.entry.scope,
-        status = ?payment.status,
-        "reconciliation verified mutation execution; idempotency lock completed"
-    );
-    Ok(ReconciliationOutcome::Completed(payment))
-}
-
-async fn release_reconciliation(
-    provider: &dyn PaymentProvider,
-    store: &dyn IdempotencyStore,
-    request: &ReconciliationRequest<'_>,
-    payment: PaymentResult,
-) -> Result<ReconciliationOutcome, PaymentError> {
-    store
-        .release(request.entry.scope, request.entry.key)
-        .await?;
-    tracing::info!(
-        provider = provider.id().as_str(),
-        scope = request.entry.scope,
-        status = ?payment.status,
-        "reconciliation confirmed mutation did not execute; idempotency lock released"
-    );
-    Ok(ReconciliationOutcome::Released(payment))
 }
 
 fn evaluate_decision(payment: &PaymentResult, kind: ReconciliationKind) -> ReconciliationDecision {
@@ -361,7 +395,11 @@ fn evaluate_capture(
     let captured = payment.captured_amount.unwrap_or(0);
     let captured_status = matches!(
         payment.status,
-        PaymentStatus::Captured | PaymentStatus::PartiallyCaptured | PaymentStatus::Paid
+        PaymentStatus::Captured
+            | PaymentStatus::PartiallyCaptured
+            | PaymentStatus::Paid
+            | PaymentStatus::PartiallyRefunded
+            | PaymentStatus::Refunded
     );
 
     if captured_status && captured >= expected_min_captured_amount {
@@ -412,17 +450,61 @@ fn redact_for_cache(payment: &PaymentResult) -> PaymentResult {
     sanitized
 }
 
-fn serialize_cached_payment(payment: &PaymentResult) -> Result<serde_json::Value, PaymentError> {
-    let sanitized = redact_for_cache(payment);
-    serde_json::to_value(&sanitized).map_err(|_| {
-        PaymentError::configuration("failed to serialize reconciled PaymentResult payload")
+fn reconciled_refund_money(
+    payment: &PaymentResult,
+    expected_min_refunded_amount: u64,
+) -> Result<Money, PaymentError> {
+    let amount = if expected_min_refunded_amount > 0 {
+        expected_min_refunded_amount
+    } else {
+        payment
+            .refunded_amount
+            .filter(|&amt| amt > 0)
+            .unwrap_or(payment.money.amount())
+    };
+    Money::new(amount, payment.money.currency())
+}
+
+fn build_reconciled_refund(
+    payment: &PaymentResult,
+    expected_min_refunded_amount: u64,
+) -> Result<RefundResult, PaymentError> {
+    let payment_id = payment.reference.payment_id().unwrap_or("unknown");
+    Ok(RefundResult {
+        refund_id: format!("reconciled:{payment_id}"),
+        payment_reference: payment.reference.clone(),
+        status: RefundStatus::Succeeded,
+        money: reconciled_refund_money(payment, expected_min_refunded_amount)?,
+        reason_detail: None,
     })
+}
+
+fn serialize_reconciled_payload(
+    request: &ReconciliationRequest<'_>,
+    payment: &PaymentResult,
+) -> Result<serde_json::Value, PaymentError> {
+    match request.kind {
+        ReconciliationKind::Refund {
+            expected_min_refunded_amount,
+        } => {
+            let refund = build_reconciled_refund(payment, expected_min_refunded_amount)?;
+            serde_json::to_value(&refund).map_err(|_| {
+                PaymentError::configuration("failed to serialize reconciled RefundResult payload")
+            })
+        }
+        ReconciliationKind::Capture { .. } | ReconciliationKind::Void => {
+            let sanitized = redact_for_cache(payment);
+            serde_json::to_value(&sanitized).map_err(|_| {
+                PaymentError::configuration("failed to serialize reconciled PaymentResult payload")
+            })
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use some_payment_core::{
@@ -431,6 +513,8 @@ mod tests {
     };
 
     use super::*;
+    use crate::idempotency::boundary::{IdempotencyBoundary, MutationContext};
+    use crate::idempotency::memory_store::InMemoryIdempotencyStore;
 
     #[derive(Debug)]
     struct MockProvider {
@@ -497,6 +581,15 @@ mod tests {
         released_target: Mutex<Option<(String, String)>>,
     }
 
+    impl RecordingStore {
+        fn counts(&self) -> (usize, usize) {
+            (
+                self.complete_calls.load(Ordering::SeqCst),
+                self.release_calls.load(Ordering::SeqCst),
+            )
+        }
+    }
+
     #[async_trait]
     impl IdempotencyStore for RecordingStore {
         async fn reserve(
@@ -547,207 +640,242 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn tc_3_1_4_refund_verified_by_refunded_amount_completes_lock() {
-        let reference = sample_reference();
-        let payment = sample_payment(PaymentStatus::PartiallyRefunded, Some(10_000), Some(5_000));
-        let provider = MockProvider::returning(payment.clone());
+    async fn run_case(
+        scope: &str,
+        key: &str,
+        kind: ReconciliationKind,
+        payment: PaymentResult,
+    ) -> (ReconciliationOutcome, RecordingStore) {
+        let reference = payment.reference.clone();
+        let provider = MockProvider::returning(payment);
         let store = RecordingStore::default();
-        let entry = IdempotencyEntry::new("moyasar:refund", "ord-314", 300);
-        let request = ReconciliationRequest::new(
-            entry,
-            &reference,
-            ReconciliationKind::Refund {
-                expected_min_refunded_amount: 5_000,
-            },
-        );
+        let entry = IdempotencyEntry::new(scope, key, 300);
+        let request = ReconciliationRequest::new(entry, &reference, kind);
+        let outcome = reconcile_indeterminate_mutation(&provider, &store, &request)
+            .await
+            .unwrap();
+        (outcome, store)
+    }
 
-        let res = reconcile_indeterminate_mutation(&provider, &store, &request).await;
-        assert_eq!(
-            res.unwrap(),
-            ReconciliationOutcome::Completed(payment.clone())
-        );
-        assert_eq!(store.complete_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store.release_calls.load(Ordering::SeqCst), 0);
-
-        let cached = store.completed_payload.lock().unwrap().clone().unwrap();
-        let decoded: PaymentResult = serde_json::from_value(cached).unwrap();
-        assert_eq!(decoded, payment);
+    #[test]
+    fn reconciliation_request_debug_redacts_idempotency_key() {
+        let reference = sample_reference();
+        let entry = IdempotencyEntry::new("moyasar:refund", "secret-idemp-key-42", 300);
+        let request = ReconciliationRequest::new(entry, &reference, ReconciliationKind::Void);
+        let dbg = format!("{request:?}");
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("secret-idemp-key-42"));
     }
 
     #[tokio::test]
-    async fn tc_3_1_4_refund_absent_on_paid_payment_releases_lock() {
-        let reference = sample_reference();
-        let payment = sample_payment(PaymentStatus::Paid, Some(10_000), Some(1_000));
-        let provider = MockProvider::returning(payment.clone());
-        let store = RecordingStore::default();
-        let entry = IdempotencyEntry::new("moyasar:refund", "ord-315", 300);
-        let request = ReconciliationRequest::new(
-            entry,
-            &reference,
-            ReconciliationKind::Refund {
-                expected_min_refunded_amount: 5_000,
-            },
-        );
-
-        let res = reconcile_indeterminate_mutation(&provider, &store, &request).await;
-        assert_eq!(res.unwrap(), ReconciliationOutcome::Released(payment));
-        assert_eq!(store.complete_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.release_calls.load(Ordering::SeqCst), 1);
+    async fn tc_3_1_4_refund_completed_caches_refund_result() {
+        let kind = ReconciliationKind::Refund {
+            expected_min_refunded_amount: 5_000,
+        };
+        let completed_pay =
+            sample_payment(PaymentStatus::PartiallyRefunded, Some(10_000), Some(5_000));
+        let (res, store) =
+            run_case("moyasar:refund", "ord-314", kind, completed_pay.clone()).await;
         assert_eq!(
-            store.released_target.lock().unwrap().as_ref(),
+            (res, store.counts()),
+            (ReconciliationOutcome::Completed(completed_pay), (1, 0))
+        );
+        let cached = store.completed_payload.lock().unwrap().clone().unwrap();
+        let decoded: RefundResult = serde_json::from_value(cached).unwrap();
+        assert_eq!(
+            (decoded.status, decoded.money.amount()),
+            (RefundStatus::Succeeded, 5_000)
+        );
+    }
+
+    #[tokio::test]
+    async fn tc_3_1_4_refund_released_and_processing_states() {
+        let kind = ReconciliationKind::Refund {
+            expected_min_refunded_amount: 5_000,
+        };
+        let paid = sample_payment(PaymentStatus::Paid, Some(10_000), Some(1_000));
+        let (rel, rel_store) = run_case("moyasar:refund", "ord-315", kind, paid.clone()).await;
+        assert_eq!(
+            (rel, rel_store.counts()),
+            (ReconciliationOutcome::Released(paid), (0, 1))
+        );
+        assert_eq!(
+            rel_store.released_target.lock().unwrap().as_ref(),
             Some(&("moyasar:refund".to_owned(), "ord-315".to_owned()))
         );
+        let proc = sample_payment(PaymentStatus::Processing, None, None);
+        let (hold, hold_store) = run_case("moyasar:refund", "ord-316", kind, proc.clone()).await;
+        assert_eq!(
+            (hold, hold_store.counts()),
+            (ReconciliationOutcome::StillIndeterminate(proc), (0, 0))
+        );
     }
 
     #[tokio::test]
-    async fn tc_3_1_4_refund_on_processing_payment_retains_lock() {
+    async fn refund_reconciliation_round_trips_through_idempotency_boundary() {
+        let store = Arc::new(InMemoryIdempotencyStore::new());
+        let boundary = IdempotencyBoundary::with_default_ttl(store.clone());
         let reference = sample_reference();
-        let payment = sample_payment(PaymentStatus::Processing, None, None);
-        let provider = MockProvider::returning(payment.clone());
-        let store = RecordingStore::default();
-        let entry = IdempotencyEntry::new("moyasar:refund", "ord-316", 300);
+        let ctx = MutationContext::new("moyasar:refund", "ord-rt-1", PaymentCapabilities::REFUND);
+
+        let err = boundary
+            .execute_idempotent_mutation::<RefundResult, _, _>(&ctx, || async {
+                Err(PaymentError::ProviderUnavailable {
+                    provider: ProviderId::new("moyasar"),
+                    http_status: Some(504),
+                    indeterminate: true,
+                    message: "timeout".to_owned(),
+                })
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.http_status(), Some(504));
+
+        let payment = sample_payment(PaymentStatus::PartiallyRefunded, Some(10_000), Some(2_500));
+        let provider = MockProvider::returning(payment);
         let request = ReconciliationRequest::new(
-            entry,
+            IdempotencyEntry::new("moyasar:refund", "ord-rt-1", 300),
             &reference,
             ReconciliationKind::Refund {
-                expected_min_refunded_amount: 5_000,
+                expected_min_refunded_amount: 2_500,
             },
         );
+        let outcome = reconcile_indeterminate_mutation(&provider, store.as_ref(), &request)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ReconciliationOutcome::Completed(_)));
 
-        let res = reconcile_indeterminate_mutation(&provider, &store, &request).await;
+        let replayed: RefundResult = boundary
+            .execute_idempotent_mutation(&ctx, || async {
+                panic!("provider must not be invoked on reconciled replay")
+            })
+            .await
+            .unwrap();
         assert_eq!(
-            res.unwrap(),
-            ReconciliationOutcome::StillIndeterminate(payment)
+            (
+                replayed.status,
+                replayed.money.amount(),
+                replayed.payment_reference
+            ),
+            (RefundStatus::Succeeded, 2_500, reference)
         );
-        assert_eq!(store.complete_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.release_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
     async fn refund_zero_threshold_uses_refund_status_not_vacuous_amount() {
-        let reference = sample_reference();
+        let kind = ReconciliationKind::Refund {
+            expected_min_refunded_amount: 0,
+        };
         let paid = sample_payment(PaymentStatus::Paid, Some(10_000), None);
-        let store = RecordingStore::default();
-        let entry = IdempotencyEntry::new("moyasar:refund", "ord-zero", 300);
-        let request = ReconciliationRequest::new(
-            entry,
-            &reference,
-            ReconciliationKind::Refund {
-                expected_min_refunded_amount: 0,
-            },
-        );
-
-        let provider_paid = MockProvider::returning(paid.clone());
-        let released = reconcile_indeterminate_mutation(&provider_paid, &store, &request).await;
-        assert_eq!(released.unwrap(), ReconciliationOutcome::Released(paid));
-        assert_eq!(store.release_calls.load(Ordering::SeqCst), 1);
-
-        let refunded = sample_payment(PaymentStatus::Refunded, Some(10_000), None);
-        let provider_refunded = MockProvider::returning(refunded.clone());
-        let completed =
-            reconcile_indeterminate_mutation(&provider_refunded, &store, &request).await;
+        let (released, rel_store) = run_case("moyasar:refund", "ord-z1", kind, paid.clone()).await;
         assert_eq!(
-            completed.unwrap(),
-            ReconciliationOutcome::Completed(refunded)
+            (released, rel_store.counts()),
+            (ReconciliationOutcome::Released(paid), (0, 1))
         );
-        assert_eq!(store.complete_calls.load(Ordering::SeqCst), 1);
+        let refunded = sample_payment(PaymentStatus::Refunded, Some(10_000), None);
+        let (done, done_store) =
+            run_case("moyasar:refund", "ord-z2", kind, refunded.clone()).await;
+        assert_eq!(
+            (done, done_store.counts()),
+            (ReconciliationOutcome::Completed(refunded), (1, 0))
+        );
     }
 
     #[tokio::test]
-    async fn capture_reconciliation_handles_completed_released_and_indeterminate() {
-        let reference = sample_reference();
-        let entry = IdempotencyEntry::new("paymob:capture", "ord-cap", 300);
-        let request = ReconciliationRequest::new(
-            entry,
-            &reference,
-            ReconciliationKind::Capture {
-                expected_min_captured_amount: 10_000,
-            },
-        );
-
+    async fn capture_reconciliation_handles_completed_post_refund_and_released() {
+        let kind = ReconciliationKind::Capture {
+            expected_min_captured_amount: 10_000,
+        };
         let captured = sample_payment(PaymentStatus::Captured, Some(10_000), None);
-        let store_complete = RecordingStore::default();
-        let provider = MockProvider::returning(captured.clone());
-        let res = reconcile_indeterminate_mutation(&provider, &store_complete, &request).await;
-        assert_eq!(res.unwrap(), ReconciliationOutcome::Completed(captured));
-        assert_eq!(store_complete.complete_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store_complete.release_calls.load(Ordering::SeqCst), 0);
-
-        let authorized = sample_payment(PaymentStatus::Authorized, None, None);
-        let store_release = RecordingStore::default();
-        let provider = MockProvider::returning(authorized.clone());
-        let res = reconcile_indeterminate_mutation(&provider, &store_release, &request).await;
-        assert_eq!(res.unwrap(), ReconciliationOutcome::Released(authorized));
-        assert_eq!(store_release.complete_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store_release.release_calls.load(Ordering::SeqCst), 1);
-
-        let processing = sample_payment(PaymentStatus::Processing, None, None);
-        let store_retain = RecordingStore::default();
-        let provider = MockProvider::returning(processing.clone());
-        let res = reconcile_indeterminate_mutation(&provider, &store_retain, &request).await;
+        let (res, store) = run_case("paymob:capture", "ord-cap", kind, captured.clone()).await;
         assert_eq!(
-            res.unwrap(),
-            ReconciliationOutcome::StillIndeterminate(processing)
+            (res, store.counts()),
+            (ReconciliationOutcome::Completed(captured), (1, 0))
         );
-        assert_eq!(store_retain.complete_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store_retain.release_calls.load(Ordering::SeqCst), 0);
+        let later_refunded =
+            sample_payment(PaymentStatus::PartiallyRefunded, Some(10_000), Some(3_000));
+        let (ref_res, ref_store) =
+            run_case("paymob:capture", "ord-cap-ref", kind, later_refunded.clone()).await;
+        assert_eq!(
+            (ref_res, ref_store.counts()),
+            (ReconciliationOutcome::Completed(later_refunded), (1, 0))
+        );
+        let authorized = sample_payment(PaymentStatus::Authorized, None, None);
+        let (rel, rel_store) =
+            run_case("paymob:capture", "ord-cap-auth", kind, authorized.clone()).await;
+        assert_eq!(
+            (rel, rel_store.counts()),
+            (ReconciliationOutcome::Released(authorized), (0, 1))
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_later_fully_refunded_and_processing_states() {
+        let kind = ReconciliationKind::Capture {
+            expected_min_captured_amount: 10_000,
+        };
+        let refunded = sample_payment(PaymentStatus::Refunded, Some(10_000), Some(10_000));
+        let (done, done_store) =
+            run_case("paymob:capture", "ord-cap-full", kind, refunded.clone()).await;
+        assert_eq!(
+            (done, done_store.counts()),
+            (ReconciliationOutcome::Completed(refunded), (1, 0))
+        );
+        let processing = sample_payment(PaymentStatus::Processing, None, None);
+        let (hold, hold_store) =
+            run_case("paymob:capture", "ord-cap-proc", kind, processing.clone()).await;
+        assert_eq!(
+            (hold, hold_store.counts()),
+            (ReconciliationOutcome::StillIndeterminate(processing), (0, 0))
+        );
     }
 
     #[tokio::test]
     async fn void_reconciliation_handles_completed_released_and_indeterminate() {
-        let reference = sample_reference();
-        let entry = IdempotencyEntry::new("paymob:void", "ord-void", 300);
-        let request = ReconciliationRequest::new(entry, &reference, ReconciliationKind::Void);
-
         let voided = sample_payment(PaymentStatus::Voided, None, None);
-        let store_complete = RecordingStore::default();
-        let provider = MockProvider::returning(voided.clone());
-        let res = reconcile_indeterminate_mutation(&provider, &store_complete, &request).await;
-        assert_eq!(res.unwrap(), ReconciliationOutcome::Completed(voided));
-        assert_eq!(store_complete.complete_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store_complete.release_calls.load(Ordering::SeqCst), 0);
-
-        let authorized = sample_payment(PaymentStatus::Authorized, None, None);
-        let store_release = RecordingStore::default();
-        let provider = MockProvider::returning(authorized.clone());
-        let res = reconcile_indeterminate_mutation(&provider, &store_release, &request).await;
-        assert_eq!(res.unwrap(), ReconciliationOutcome::Released(authorized));
-        assert_eq!(store_release.complete_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store_release.release_calls.load(Ordering::SeqCst), 1);
-
-        let requires_action = sample_payment(PaymentStatus::RequiresAction, None, None);
-        let store_retain = RecordingStore::default();
-        let provider = MockProvider::returning(requires_action.clone());
-        let res = reconcile_indeterminate_mutation(&provider, &store_retain, &request).await;
+        let (done, done_store) =
+            run_case("paymob:void", "ord-v1", ReconciliationKind::Void, voided.clone()).await;
         assert_eq!(
-            res.unwrap(),
-            ReconciliationOutcome::StillIndeterminate(requires_action)
+            (done, done_store.counts()),
+            (ReconciliationOutcome::Completed(voided), (1, 0))
         );
-        assert_eq!(store_retain.complete_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store_retain.release_calls.load(Ordering::SeqCst), 0);
+        let authorized = sample_payment(PaymentStatus::Authorized, None, None);
+        let (rel, rel_store) = run_case(
+            "paymob:void",
+            "ord-v2",
+            ReconciliationKind::Void,
+            authorized.clone(),
+        )
+        .await;
+        assert_eq!(
+            (rel, rel_store.counts()),
+            (ReconciliationOutcome::Released(authorized), (0, 1))
+        );
+        let req_action = sample_payment(PaymentStatus::RequiresAction, None, None);
+        let (hold, hold_store) = run_case(
+            "paymob:void",
+            "ord-v3",
+            ReconciliationKind::Void,
+            req_action.clone(),
+        )
+        .await;
+        assert_eq!(
+            (hold, hold_store.counts()),
+            (ReconciliationOutcome::StillIndeterminate(req_action), (0, 0))
+        );
     }
 
     #[tokio::test]
     async fn reconciliation_redacts_embedded_client_secret_before_caching() {
-        let reference = sample_reference();
-        let mut payment = sample_payment(PaymentStatus::Refunded, Some(10_000), Some(10_000));
+        let mut payment = sample_payment(PaymentStatus::Captured, Some(10_000), None);
         payment.next_action = Some(NextAction::EmbeddedClientSecret {
             client_secret: "pi_secret_live_sensitive_token".to_owned(),
         });
-        let provider = MockProvider::returning(payment);
-        let store = RecordingStore::default();
-        let entry = IdempotencyEntry::new("moyasar:refund", "ord-secret", 300);
-        let request = ReconciliationRequest::new(
-            entry,
-            &reference,
-            ReconciliationKind::Refund {
-                expected_min_refunded_amount: 10_000,
-            },
-        );
-
-        let res = reconcile_indeterminate_mutation(&provider, &store, &request).await;
-        assert!(matches!(res.unwrap(), ReconciliationOutcome::Completed(_)));
+        let kind = ReconciliationKind::Capture {
+            expected_min_captured_amount: 10_000,
+        };
+        let (res, store) = run_case("moyasar:capture", "ord-secret", kind, payment).await;
+        assert!(matches!(res, ReconciliationOutcome::Completed(_)));
 
         let cached_json = store
             .completed_payload
@@ -756,8 +884,10 @@ mod tests {
             .clone()
             .unwrap()
             .to_string();
-        assert!(cached_json.contains("[REDACTED]"));
-        assert!(!cached_json.contains("pi_secret_live_sensitive_token"));
+        assert!(
+            cached_json.contains("[REDACTED]")
+                && !cached_json.contains("pi_secret_live_sensitive_token")
+        );
     }
 
     #[tokio::test]
@@ -785,8 +915,6 @@ mod tests {
         let err = reconcile_indeterminate_mutation(&provider, &store, &request)
             .await
             .unwrap_err();
-        assert_eq!(err.http_status(), Some(503));
-        assert_eq!(store.complete_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(store.release_calls.load(Ordering::SeqCst), 0);
+        assert_eq!((err.http_status(), store.counts()), (Some(503), (0, 0)));
     }
 }

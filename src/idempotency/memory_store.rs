@@ -1,5 +1,5 @@
-//! Thread-safe [`InMemoryIdempotencyStore`] with TTL expiry and capacity bounds
-//! strictly for development and automated testing.
+//! Thread-safe [`InMemoryIdempotencyStore`] with TTL expiry and entry-count
+//! capacity bounds strictly for development and automated testing.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -11,8 +11,9 @@ use some_payment_core::{IdempotencyEntry, IdempotencyStore, PaymentError, Reserv
 
 /// Default upper bound on active entries stored in [`InMemoryIdempotencyStore`].
 ///
-/// Enforces a fail-closed memory bound (`TM-5`) so unbounded caller keys cannot
-/// exhaust process memory.
+/// This is an **entry-count** ceiling (not a byte-memory cap) enforcing a
+/// fail-closed bound (`TM-5`) so unbounded caller keys cannot grow the map
+/// without limit.
 pub const DEFAULT_MAX_CAPACITY: usize = 10_000;
 
 type StoreKey = (String, String);
@@ -38,7 +39,7 @@ struct StoredRecord {
 }
 
 /// Thread-safe, in-memory [`IdempotencyStore`] implementation with TTL eviction
-/// and a fail-closed entry capacity bound.
+/// and a fail-closed **entry-count** capacity bound.
 ///
 /// # Warning
 ///
@@ -49,12 +50,23 @@ struct StoredRecord {
 /// PostgreSQL (`INSERT ... ON CONFLICT`) so concurrent workers share a single
 /// atomic lock space (mitigating `TM-5`).
 ///
+/// # TTL Eviction Semantics for `InProgress` Records
+///
+/// In this dev/test store, TTL expiry evicts **both** `Completed` and
+/// `InProgress` records once `expires_at` elapses so unit tests can exercise
+/// lock expiry deterministically. Production distributed stores MUST pair lock
+/// leases with background reconciliation
+/// ([`crate::idempotency::reconciliation::reconcile_indeterminate_mutation`])
+/// rather than silently releasing an indeterminate `InProgress` lock to
+/// concurrent callers.
+///
 /// # Security
 ///
 /// - [`fmt::Debug`] is redacted and reports only the current entry count and
 ///   `max_capacity`, never cached payloads or raw keys (mitigating `TM-4`).
-/// - Rejects new reservations once `max_capacity` is reached after evicting
-///   expired entries (fail-closed DoS protection, mitigating `TM-5`).
+/// - Rejects new reservations once the `max_capacity` **entry-count** ceiling
+///   (not byte size) is reached after evicting expired entries (fail-closed
+///   DoS protection, mitigating `TM-5`).
 ///
 /// # Examples
 ///
@@ -90,7 +102,7 @@ pub struct InMemoryIdempotencyStore {
 }
 
 impl InMemoryIdempotencyStore {
-    /// Creates an empty store bounded by [`DEFAULT_MAX_CAPACITY`].
+    /// Creates an empty store bounded by [`DEFAULT_MAX_CAPACITY`] entries.
     ///
     /// # Examples
     ///
@@ -111,7 +123,8 @@ impl InMemoryIdempotencyStore {
         }
     }
 
-    /// Creates an empty store with an explicit `max_capacity` ceiling.
+    /// Creates an empty store with an explicit `max_capacity` **entry-count**
+    /// ceiling (not a byte-memory cap).
     ///
     /// Returns [`PaymentError::ConfigurationError`] if `max_capacity` is `0`.
     ///
@@ -151,7 +164,7 @@ impl InMemoryIdempotencyStore {
         self.len() == 0
     }
 
-    /// Returns the configured maximum entry capacity of this store.
+    /// Returns the configured maximum **entry-count** capacity of this store.
     #[must_use]
     pub fn max_capacity(&self) -> usize {
         self.max_capacity
