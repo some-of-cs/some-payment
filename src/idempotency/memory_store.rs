@@ -456,7 +456,7 @@ mod tests {
         let mid = base + Duration::from_secs(5);
         let cap_err = store.reserve_at(&k3, mid).unwrap_err();
         assert_eq!(cap_err.kind(), ErrorKind::Configuration);
-        let PaymentError::ConfigurationError { message } = cap_err else {
+        let PaymentError::ConfigurationError { message } = &cap_err else {
             panic!("expected configuration error");
         };
         assert!(message.contains("capacity reached"));
