@@ -176,7 +176,9 @@ impl fmt::Debug for InMemoryDedupStore {
 fn validate_event_id(event_id: &str) -> Result<&str, PaymentError> {
     let trimmed = event_id.trim();
     if trimmed.is_empty() {
-        return Err(PaymentError::validation("webhook event_id must not be empty"));
+        return Err(PaymentError::validation(
+            "webhook event_id must not be empty",
+        ));
     }
     Ok(trimmed)
 }
@@ -203,7 +205,9 @@ impl WebhookDeduplicationStore for InMemoryDedupStore {
             return Ok(false);
         }
         if entries.len() >= self.max_capacity {
-            return Err(PaymentError::validation("webhook deduplication store capacity exceeded"));
+            return Err(PaymentError::validation(
+                "webhook deduplication store capacity exceeded",
+            ));
         }
 
         let expires_at = compute_expiry(now, self.ttl)?;
@@ -258,7 +262,9 @@ pub fn validate_monotonic_transition(
         return Ok(());
     }
     if TERMINAL_STATUSES.contains(&current) || is_blocked_transition(current, incoming) {
-        return Err(PaymentError::validation("invalid non-monotonic payment status transition"));
+        return Err(PaymentError::validation(
+            "invalid non-monotonic payment status transition",
+        ));
     }
     Ok(())
 }
@@ -366,7 +372,12 @@ mod tests {
     async fn dedup_debug_redacts_recorded_event_ids() {
         let store = InMemoryDedupStore::new();
         let stripe = ProviderId::new("stripe");
-        assert!(store.record_if_new(&stripe, "evt_sensitive_999").await.unwrap());
+        assert!(
+            store
+                .record_if_new(&stripe, "evt_sensitive_999")
+                .await
+                .unwrap()
+        );
 
         let dbg = format!("{store:?}");
         assert!(dbg.contains("[REDACTED]"));
