@@ -825,8 +825,7 @@ mod tests {
     async fn tc_2_1_3_happy_path_all_six_operations() {
         let provider = MockProvider::new("alpha", PaymentCapabilities::all());
         let hook = Arc::new(RecordingHook::default());
-        let mut hooks = HookChain::new();
-        hooks.push(hook.clone());
+        let hooks = HookChain::new(vec![hook.clone()]);
         let orch = PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
         let created = orch.create_payment(&sample_create_req()).await.unwrap();
@@ -970,8 +969,7 @@ mod tests {
     #[tokio::test]
     async fn ac_2_before_hook_abort_prevents_provider_calls_across_all_six_ops() {
         let provider = MockProvider::new("alpha", PaymentCapabilities::all());
-        let mut hooks = HookChain::new();
-        hooks.push(Arc::new(AbortingHook));
+        let hooks = HookChain::new(vec![Arc::new(AbortingHook)]);
         let orch = PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
         assert_eq!(
@@ -1023,8 +1021,7 @@ mod tests {
     async fn ac_3_failing_after_hook_preserves_ok_results() {
         let provider = MockProvider::new("alpha", PaymentCapabilities::all());
         let failing_hook = Arc::new(FailingAfterHook::default());
-        let mut hooks = HookChain::new();
-        hooks.push(failing_hook.clone());
+        let hooks = HookChain::new(vec![failing_hook.clone()]);
         let orch = PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
         assert!(orch.create_payment(&sample_create_req()).await.is_ok());
@@ -1051,8 +1048,7 @@ mod tests {
     async fn on_error_hook_fires_on_provider_failure_across_all_six_ops() {
         let provider = MockProvider::failing("alpha", PaymentCapabilities::all());
         let hook = Arc::new(RecordingHook::default());
-        let mut hooks = HookChain::new();
-        hooks.push(hook.clone());
+        let hooks = HookChain::new(vec![hook.clone()]);
         let orch = PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
         assert_eq!(
@@ -1191,8 +1187,7 @@ mod tests {
     async fn validation_error_short_circuits_before_provider_and_hooks() {
         let provider = MockProvider::new("alpha", PaymentCapabilities::all());
         let hook = Arc::new(RecordingHook::default());
-        let mut hooks = HookChain::new();
-        hooks.push(hook.clone());
+        let hooks = HookChain::new(vec![hook.clone()]);
         let orch: PaymentHub =
             PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
