@@ -291,7 +291,8 @@ mod tests {
     #[test]
     fn case_insensitive_header_lookup() {
         let mut req = sample_request(b"{}".to_vec());
-        req.headers.insert("Stripe-Signature".into(), "t=1700,v1=abc".into());
+        req.headers
+            .insert("Stripe-Signature".into(), "t=1700,v1=abc".into());
         let validated = ValidatedRawWebhook::try_new(req).unwrap();
 
         assert_eq!(validated.header("Stripe-Signature"), Some("t=1700,v1=abc"));
@@ -313,14 +314,18 @@ mod tests {
 
         let mut too_many_headers = sample_request(b"{}".to_vec());
         for i in 0..=MAX_HEADER_COUNT {
-            too_many_headers.headers.insert(format!("x-h-{i}"), "v".into());
+            too_many_headers
+                .headers
+                .insert(format!("x-h-{i}"), "v".into());
         }
         let h_err = ValidatedRawWebhook::try_new(too_many_headers).expect_err("129 headers");
         assert_eq!(h_err.kind(), ErrorKind::Validation);
 
         let mut too_many_query = sample_request(b"{}".to_vec());
         for i in 0..=MAX_QUERY_PARAM_COUNT {
-            too_many_query.query_params.insert(format!("q{i}"), "v".into());
+            too_many_query
+                .query_params
+                .insert(format!("q{i}"), "v".into());
         }
         let q_err = ValidatedRawWebhook::try_new(too_many_query).expect_err("129 query params");
         assert_eq!(q_err.kind(), ErrorKind::Validation);
@@ -352,7 +357,10 @@ mod tests {
         let valid_128: Vec<String> = (0..MAX_QUERY_PARAM_COUNT)
             .map(|i| format!("k{i}=1"))
             .collect();
-        assert_eq!(parse_query_string(&valid_128.join("&")).unwrap().len(), MAX_QUERY_PARAM_COUNT);
+        assert_eq!(
+            parse_query_string(&valid_128.join("&")).unwrap().len(),
+            MAX_QUERY_PARAM_COUNT
+        );
 
         let invalid_129: Vec<String> = (0..=MAX_QUERY_PARAM_COUNT)
             .map(|i| format!("k{i}=1"))
@@ -364,8 +372,10 @@ mod tests {
     #[test]
     fn debug_redacts_body_headers_and_query_values() {
         let mut req = sample_request(b"{\"secret_token\":\"BODY_CANARY_123\"}".to_vec());
-        req.headers.insert("Stripe-Signature".into(), "HEADER_CANARY_456".into());
-        req.query_params.insert("hmac".into(), "QUERY_CANARY_789".into());
+        req.headers
+            .insert("Stripe-Signature".into(), "HEADER_CANARY_456".into());
+        req.query_params
+            .insert("hmac".into(), "QUERY_CANARY_789".into());
         req.method = HttpMethod::Get;
 
         let validated = ValidatedRawWebhook::try_new(req).unwrap();
