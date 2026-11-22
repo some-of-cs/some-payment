@@ -4,6 +4,10 @@ members = [
     ".",
     "crates/some-payment-core",
 ]
+default-members = [
+    ".",
+    "crates/some-payment-core",
+]
 exclude = [".worktrees"]
 
 [workspace.package]
