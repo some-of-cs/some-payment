@@ -315,12 +315,16 @@ fn validate_optional_country(country: Option<&str>) -> Result<(), PaymentError> 
 
 fn has_valid_host_and_chars(rest: &str) -> bool {
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let has_bad_char = rest.chars().any(|ch| ch.is_whitespace() || ch.is_ascii_control());
+    let has_bad_char = rest
+        .chars()
+        .any(|ch| ch.is_whitespace() || ch.is_ascii_control());
     !authority.is_empty() && !has_bad_char
 }
 
 fn validate_http_url(url: &str, field: &str) -> Result<(), PaymentError> {
-    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"));
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
     if !rest.is_some_and(has_valid_host_and_chars) {
         return Err(PaymentError::validation(format!(
             "{field} must be a valid http:// or https:// URL"
