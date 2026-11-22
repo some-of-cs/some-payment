@@ -374,10 +374,7 @@ impl PaymentError {
         if DEFINITIVE_KINDS.contains(&self.kind()) {
             return true;
         }
-        matches!(
-            self.http_status(),
-            Some(400..=407 | 409..=428 | 430..=499)
-        )
+        matches!(self.http_status(), Some(400..=407 | 409..=428 | 430..=499))
     }
 
     /// Returns the upstream HTTP status code if available.
