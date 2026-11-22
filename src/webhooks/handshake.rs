@@ -216,7 +216,9 @@ pub async fn route_verification_handshake(
     };
 
     validate_verification_challenge(challenge)?;
-    handler.handle_verification(&event.provider_id, challenge).await?;
+    handler
+        .handle_verification(&event.provider_id, challenge)
+        .await?;
 
     tracing::info!(
         provider_id = %event.provider_id,
@@ -246,7 +248,9 @@ fn validate_webhook_id(webhook_id: &str) -> Result<(), PaymentError> {
 
 fn validate_verification_code(code: &str) -> Result<(), PaymentError> {
     if code.len() != VERIFICATION_CODE_LEN || !code.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(PaymentError::validation("verification_code must be exactly 6 ASCII digits"));
+        return Err(PaymentError::validation(
+            "verification_code must be exactly 6 ASCII digits",
+        ));
     }
     Ok(())
 }
