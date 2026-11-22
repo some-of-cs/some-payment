@@ -454,7 +454,11 @@ mod tests {
     #[test]
     fn validates_order_id_country_url_and_metadata_bounds() {
         let money = Money::new(10_000, "SAR").unwrap();
-        assert!(CreatePaymentRequest::new(money.clone(), "   ").validate().is_err());
+        assert!(
+            CreatePaymentRequest::new(money.clone(), "   ")
+                .validate()
+                .is_err()
+        );
         assert!(
             CreatePaymentRequest::new(money.clone(), "x".repeat(256))
                 .validate()

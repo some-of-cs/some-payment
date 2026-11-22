@@ -43,7 +43,11 @@ const ERROR_KIND_META: &[(&str, ErrorKind, &str)] = &[
         ErrorKind::Configuration,
         "configuration error",
     ),
-    ("unsupported", ErrorKind::Unsupported, "unsupported operation"),
+    (
+        "unsupported",
+        ErrorKind::Unsupported,
+        "unsupported operation",
+    ),
     ("card_declined", ErrorKind::CardDeclined, "payment declined"),
     (
         "three_ds_failed",
