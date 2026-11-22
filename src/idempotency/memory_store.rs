@@ -298,7 +298,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use some_payment_core::{ErrorKind, IdempotencyEntry, IdempotencyStore, ReserveOutcome};
+    use some_payment_core::{
+        ErrorKind, IdempotencyEntry, IdempotencyStore, PaymentError, ReserveOutcome,
+    };
 
     use super::{DEFAULT_MAX_CAPACITY, InMemoryIdempotencyStore};
 
@@ -454,7 +456,10 @@ mod tests {
         let mid = base + Duration::from_secs(5);
         let cap_err = store.reserve_at(&k3, mid).unwrap_err();
         assert_eq!(cap_err.kind(), ErrorKind::Configuration);
-        assert!(cap_err.to_string().contains("capacity reached"));
+        let PaymentError::ConfigurationError { message } = cap_err else {
+            panic!("expected configuration error");
+        };
+        assert!(message.contains("capacity reached"));
 
         store.complete_at(&k1, &payload, mid).unwrap();
         assert_eq!(
