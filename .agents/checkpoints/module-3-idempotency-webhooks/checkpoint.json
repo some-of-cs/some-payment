@@ -1,0 +1,28 @@
+{
+  "module": "module-3-idempotency-webhooks",
+  "base_branch": "main",
+  "module_branch": "feat/module-3-idempotency-webhooks",
+  "status": "wave_1_scaffolded",
+  "stories": {
+    "US-3.1.0": {
+      "branch": "feat/us-3.1.0-distributed-idempotency-boundary",
+      "status": "in_progress",
+      "units": {
+        "unit-1": { "branch": "feat/us-3.1.0/unit-1-scope-keys", "file": "src/idempotency/scope_keys.rs", "status": "pending" },
+        "unit-2": { "branch": "feat/us-3.1.0/unit-2-boundary", "file": "src/idempotency/boundary.rs", "status": "pending" },
+        "unit-3": { "branch": "feat/us-3.1.0/unit-3-memory-store", "file": "src/idempotency/memory_store.rs", "status": "pending" },
+        "unit-4": { "branch": "feat/us-3.1.0/unit-4-reconciliation", "file": "src/idempotency/reconciliation.rs", "status": "pending" }
+      }
+    },
+    "US-3.2.0": {
+      "branch": "feat/us-3.2.0-unified-webhook-pipeline",
+      "status": "in_progress",
+      "units": {
+        "unit-1": { "branch": "feat/us-3.2.0/unit-1-raw-request", "file": "src/webhooks/raw_request.rs", "status": "pending" },
+        "unit-2": { "branch": "feat/us-3.2.0/unit-2-dispatcher", "file": "src/webhooks/dispatcher.rs", "status": "pending" },
+        "unit-3": { "branch": "feat/us-3.2.0/unit-3-handshake", "file": "src/webhooks/handshake.rs", "status": "pending" },
+        "unit-4": { "branch": "feat/us-3.2.0/unit-4-dedup-guard", "file": "src/webhooks/dedup_guard.rs", "status": "pending" }
+      }
+    }
+  }
+}
