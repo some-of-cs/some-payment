@@ -2,26 +2,28 @@
   "module": "module-3-idempotency-webhooks",
   "base_branch": "main",
   "module_branch": "feat/module-3-idempotency-webhooks",
-  "status": "wave_1_scaffolded",
+  "status": "wave_4_module_review",
   "stories": {
     "US-3.1.0": {
       "branch": "feat/us-3.1.0-distributed-idempotency-boundary",
-      "status": "in_progress",
+      "pr": 22,
+      "status": "merged",
       "units": {
-        "unit-1": { "branch": "feat/us-3.1.0/unit-1-scope-keys", "file": "src/idempotency/scope_keys.rs", "status": "pending" },
-        "unit-2": { "branch": "feat/us-3.1.0/unit-2-boundary", "file": "src/idempotency/boundary.rs", "status": "pending" },
-        "unit-3": { "branch": "feat/us-3.1.0/unit-3-memory-store", "file": "src/idempotency/memory_store.rs", "status": "pending" },
-        "unit-4": { "branch": "feat/us-3.1.0/unit-4-reconciliation", "file": "src/idempotency/reconciliation.rs", "status": "pending" }
+        "unit-1": { "branch": "feat/us-3.1.0/unit-1-scope-keys", "pr": 17, "file": "src/idempotency/scope_keys.rs", "status": "merged" },
+        "unit-2": { "branch": "feat/us-3.1.0/unit-2-boundary", "pr": 15, "file": "src/idempotency/boundary.rs", "status": "merged" },
+        "unit-3": { "branch": "feat/us-3.1.0/unit-3-memory-store", "pr": 14, "file": "src/idempotency/memory_store.rs", "status": "merged" },
+        "unit-4": { "branch": "feat/us-3.1.0/unit-4-reconciliation", "pr": 18, "file": "src/idempotency/reconciliation.rs", "status": "merged" }
       }
     },
     "US-3.2.0": {
       "branch": "feat/us-3.2.0-unified-webhook-pipeline",
-      "status": "in_progress",
+      "pr": 25,
+      "status": "merged",
       "units": {
-        "unit-1": { "branch": "feat/us-3.2.0/unit-1-raw-request", "file": "src/webhooks/raw_request.rs", "status": "pending" },
-        "unit-2": { "branch": "feat/us-3.2.0/unit-2-dispatcher", "file": "src/webhooks/dispatcher.rs", "status": "pending" },
-        "unit-3": { "branch": "feat/us-3.2.0/unit-3-handshake", "file": "src/webhooks/handshake.rs", "status": "pending" },
-        "unit-4": { "branch": "feat/us-3.2.0/unit-4-dedup-guard", "file": "src/webhooks/dedup_guard.rs", "status": "pending" }
+        "unit-1": { "branch": "feat/us-3.2.0/unit-1-raw-request", "pr": 13, "file": "src/webhooks/raw_request.rs", "status": "merged" },
+        "unit-2": { "branch": "feat/us-3.2.0/unit-2-dispatcher", "pr": 21, "file": "src/webhooks/dispatcher.rs", "status": "merged" },
+        "unit-3": { "branch": "feat/us-3.2.0/unit-3-handshake", "pr": 19, "file": "src/webhooks/handshake.rs", "status": "merged" },
+        "unit-4": { "branch": "feat/us-3.2.0/unit-4-dedup-guard", "pr": 20, "file": "src/webhooks/dedup_guard.rs", "status": "merged" }
       }
     }
   }
