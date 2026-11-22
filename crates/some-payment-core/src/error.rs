@@ -3,6 +3,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::provider_id::ProviderId;
 
@@ -121,7 +122,7 @@ impl ErrorKind {
 /// Implements custom [`fmt::Display`] and [`fmt::Debug`] formatting that never
 /// interpolate raw provider-sourced `message` or `reason` payloads, ensuring
 /// secret keys, webhook secrets, or cardholder data cannot leak into logs or
-/// panic traces.
+/// panic traces. Sensitive string buffers are zeroized on drop.
 ///
 /// # Examples
 ///
@@ -367,10 +368,16 @@ impl PaymentError {
     /// Returns `true` if this error represents a definitive local or 4xx client
     /// rejection where an idempotency lock may be safely released.
     pub fn is_definitive_client_rejection(&self) -> bool {
+        if matches!(self, Self::ProviderUnavailable { .. }) {
+            return false;
+        }
         if DEFINITIVE_KINDS.contains(&self.kind()) {
             return true;
         }
-        matches!(self.http_status(), Some(400..=428 | 430..=499))
+        matches!(
+            self.http_status(),
+            Some(400..=407 | 409..=428 | 430..=499)
+        )
     }
 
     /// Returns the upstream HTTP status code if available.
@@ -390,6 +397,53 @@ impl PaymentError {
             Self::CardDeclined { decline_code, .. } => decline_code.as_deref(),
             _ => None,
         }
+    }
+
+    fn zeroize_primary_buffers(&mut self) {
+        match self {
+            Self::ValidationError { message }
+            | Self::ConfigurationError { message }
+            | Self::AuthenticationError { message, .. }
+            | Self::ProviderUnavailable { message, .. } => message.zeroize(),
+            Self::WebhookVerificationFailed { reason, .. } => reason.zeroize(),
+            Self::AbortedByHook { reason } => reason.zeroize(),
+            _ => {}
+        }
+    }
+
+    fn zeroize_coded_buffers(&mut self) {
+        match self {
+            Self::CardDeclined {
+                decline_code,
+                advice_code,
+                message,
+                ..
+            } => {
+                decline_code.zeroize();
+                advice_code.zeroize();
+                message.zeroize();
+            }
+            Self::ThreeDsFailed { code, message, .. } => {
+                code.zeroize();
+                message.zeroize();
+            }
+            Self::ProviderError {
+                vendor_code,
+                message,
+                ..
+            } => {
+                vendor_code.zeroize();
+                message.zeroize();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Drop for PaymentError {
+    fn drop(&mut self) {
+        self.zeroize_primary_buffers();
+        self.zeroize_coded_buffers();
     }
 }
 
@@ -585,5 +639,60 @@ mod tests {
             Some(ErrorKind::ThreeDsFailed)
         );
         assert_eq!(ErrorKind::from_slug("unknown"), None);
+    }
+
+    #[test]
+    fn rejects_lock_release_on_408_and_provider_unavailable_4xx() {
+        let unavail_408 = PaymentError::ProviderUnavailable {
+            provider: ProviderId::new("stripe"),
+            http_status: Some(408),
+            indeterminate: true,
+            message: "request timed out".into(),
+        };
+        assert!(!unavail_408.is_definitive_client_rejection());
+
+        let unavail_400 = PaymentError::ProviderUnavailable {
+            provider: ProviderId::new("paymob"),
+            http_status: Some(400),
+            indeterminate: false,
+            message: "ambiguous gateway outage".into(),
+        };
+        assert!(!unavail_400.is_definitive_client_rejection());
+
+        let provider_408 = PaymentError::ProviderError {
+            provider: ProviderId::new("moyasar"),
+            http_status: Some(408),
+            vendor_code: Some("timeout".into()),
+            message: "request timeout".into(),
+        };
+        assert!(!provider_408.is_definitive_client_rejection());
+    }
+
+    #[test]
+    fn zeroize_buffers_scrubs_sensitive_error_strings_and_clone_works() {
+        let mut declined = PaymentError::CardDeclined {
+            provider: ProviderId::new("stripe"),
+            decline_code: Some("insufficient_funds".into()),
+            advice_code: Some("try_again_later".into()),
+            message: "secret_canary_decline".into(),
+        };
+        let cloned = declined.clone();
+        assert_eq!(cloned.decline_code(), Some("insufficient_funds"));
+
+        declined.zeroize_primary_buffers();
+        declined.zeroize_coded_buffers();
+        if let PaymentError::CardDeclined {
+            decline_code,
+            advice_code,
+            message,
+            ..
+        } = &declined
+        {
+            assert!(decline_code.as_deref().is_none_or(str::is_empty));
+            assert!(advice_code.as_deref().is_none_or(str::is_empty));
+            assert!(message.is_empty());
+        } else {
+            panic!("expected CardDeclined");
+        }
     }
 }

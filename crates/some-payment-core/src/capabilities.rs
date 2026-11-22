@@ -58,6 +58,23 @@ bitflags! {
 mod tests {
     use super::*;
 
+    const ALL_FLAGS: [PaymentCapabilities; 14] = [
+        PaymentCapabilities::DIRECT_PAYMENT,
+        PaymentCapabilities::EMBEDDED_INTENT,
+        PaymentCapabilities::HOSTED_CHECKOUT,
+        PaymentCapabilities::AUTH_CAPTURE,
+        PaymentCapabilities::PARTIAL_CAPTURE,
+        PaymentCapabilities::VOID_AUTHORIZED,
+        PaymentCapabilities::VOID_SETTLED_WINDOW,
+        PaymentCapabilities::REFUND,
+        PaymentCapabilities::PARTIAL_REFUND,
+        PaymentCapabilities::NATIVE_CREATE_IDEMPOTENCY,
+        PaymentCapabilities::NATIVE_MUTATION_IDEMPOTENCY,
+        PaymentCapabilities::SAVED_CARDS,
+        PaymentCapabilities::SPLITS,
+        PaymentCapabilities::WEBHOOK_VERIFICATION_HANDSHAKE,
+    ];
+
     #[test]
     fn default_is_empty_and_bitmask_operations_work() {
         let empty = PaymentCapabilities::default();
@@ -72,7 +89,52 @@ mod tests {
             | PaymentCapabilities::NATIVE_CREATE_IDEMPOTENCY
             | PaymentCapabilities::WEBHOOK_VERIFICATION_HANDSHAKE;
 
+        let paymob = PaymentCapabilities::EMBEDDED_INTENT
+            | PaymentCapabilities::HOSTED_CHECKOUT
+            | PaymentCapabilities::AUTH_CAPTURE
+            | PaymentCapabilities::VOID_SETTLED_WINDOW
+            | PaymentCapabilities::REFUND
+            | PaymentCapabilities::PARTIAL_REFUND;
+
+        let shared = moyasar & paymob;
+        assert_eq!(
+            shared,
+            PaymentCapabilities::EMBEDDED_INTENT
+                | PaymentCapabilities::HOSTED_CHECKOUT
+                | PaymentCapabilities::AUTH_CAPTURE
+                | PaymentCapabilities::REFUND
+                | PaymentCapabilities::PARTIAL_REFUND
+        );
         assert!(moyasar.contains(PaymentCapabilities::NATIVE_CREATE_IDEMPOTENCY));
         assert!(!moyasar.contains(PaymentCapabilities::NATIVE_MUTATION_IDEMPOTENCY));
+        assert!(!shared.contains(PaymentCapabilities::VOID_SETTLED_WINDOW));
+    }
+
+    #[test]
+    fn all_fourteen_flags_are_distinct_and_compose_to_all() {
+        let mut combined = PaymentCapabilities::empty();
+        for (idx, flag) in ALL_FLAGS.iter().copied().enumerate() {
+            assert_eq!(flag.bits(), 1_u32 << idx);
+            assert!(PaymentCapabilities::all().contains(flag));
+            assert!((combined & flag).is_empty());
+            combined |= flag;
+        }
+        assert_eq!(combined, PaymentCapabilities::all());
+    }
+
+    #[test]
+    fn serde_json_round_trip_preserves_capabilities() {
+        let samples = [
+            PaymentCapabilities::empty(),
+            PaymentCapabilities::DIRECT_PAYMENT
+                | PaymentCapabilities::REFUND
+                | PaymentCapabilities::SPLITS,
+            PaymentCapabilities::all(),
+        ];
+        for sample in samples {
+            let json = serde_json::to_string(&sample).unwrap();
+            let decoded: PaymentCapabilities = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, sample);
+        }
     }
 }

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::error::PaymentError;
 use crate::money::Money;
@@ -114,6 +115,14 @@ impl fmt::Debug for CreatePaymentRequest {
     }
 }
 
+impl Drop for CreatePaymentRequest {
+    fn drop(&mut self) {
+        self.payment_token.zeroize();
+        self.customer_email.zeroize();
+        self.customer_phone.zeroize();
+    }
+}
+
 impl CreatePaymentRequest {
     /// Creates a new [`CreatePaymentRequest`] with [`CaptureMode::Automatic`].
     pub fn new(money: Money, order_id: impl Into<String>) -> Self {
@@ -209,6 +218,13 @@ impl fmt::Debug for CheckoutSessionRequest {
             .field("idempotency_key", &self.idempotency_key)
             .field("metadata", &self.metadata)
             .finish()
+    }
+}
+
+impl Drop for CheckoutSessionRequest {
+    fn drop(&mut self) {
+        self.customer_email.zeroize();
+        self.customer_phone.zeroize();
     }
 }
 
@@ -313,12 +329,51 @@ fn validate_optional_country(country: Option<&str>) -> Result<(), PaymentError> 
     Ok(())
 }
 
+fn is_printable_ascii_url(rest: &str) -> bool {
+    rest.chars()
+        .all(|ch| ch.is_ascii() && !ch.is_ascii_control() && !ch.is_ascii_whitespace())
+}
+
+fn is_valid_port(port: &str) -> bool {
+    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
+}
+
+fn is_valid_ipv6_authority(authority: &str) -> bool {
+    let Some(rest) = authority.strip_prefix('[') else {
+        return false;
+    };
+    let Some((host, suffix)) = rest.split_once(']') else {
+        return false;
+    };
+    if host.is_empty() || host.contains('[') {
+        return false;
+    }
+    suffix.is_empty() || suffix.strip_prefix(':').is_some_and(is_valid_port)
+}
+
+fn is_valid_host_port(authority: &str) -> bool {
+    if authority.contains('[') || authority.contains(']') {
+        return false;
+    }
+    match authority.split_once(':') {
+        Some((host, port)) => !host.is_empty() && is_valid_port(port),
+        None => !authority.is_empty(),
+    }
+}
+
+fn is_valid_authority(authority: &str) -> bool {
+    if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
+        return false;
+    }
+    if authority.starts_with('[') {
+        return is_valid_ipv6_authority(authority);
+    }
+    is_valid_host_port(authority)
+}
+
 fn has_valid_host_and_chars(rest: &str) -> bool {
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let has_bad_char = rest
-        .chars()
-        .any(|ch| ch.is_whitespace() || ch.is_ascii_control());
-    !authority.is_empty() && !has_bad_char
+    is_printable_ascii_url(rest) && is_valid_authority(authority)
 }
 
 fn validate_http_url(url: &str, field: &str) -> Result<(), PaymentError> {
@@ -647,6 +702,35 @@ mod tests {
             let mut req = CreatePaymentRequest::new(money.clone(), "ORD-URL");
             req.callback_url = Some(url.into());
             assert!(req.validate().is_err(), "expected error for {url}");
+        }
+    }
+
+    #[test]
+    fn rejects_userinfo_backslash_empty_host_port_and_non_ascii_urls() {
+        let money = Money::new(1_000, "USD").unwrap();
+        let bad_urls = [
+            "https://user:pass@example.com/cb",
+            "https://@evil.com",
+            "https://:443",
+            "https://:",
+            "https://evil.com\\@trusted.com",
+            "https://example.com/\u{202E}cb",
+        ];
+        for url in bad_urls {
+            let mut req = CreatePaymentRequest::new(money.clone(), "ORD-URL-ADV");
+            req.callback_url = Some(url.into());
+            assert!(req.validate().is_err(), "expected error for {url}");
+        }
+
+        let good_urls = [
+            "https://[::1]:8443/cb",
+            "https://[::1]/cb",
+            "https://example.com:8443/cb",
+        ];
+        for url in good_urls {
+            let mut req = CreatePaymentRequest::new(money.clone(), "ORD-URL-OK");
+            req.callback_url = Some(url.into());
+            assert!(req.validate().is_ok(), "expected ok for {url}");
         }
     }
 }
