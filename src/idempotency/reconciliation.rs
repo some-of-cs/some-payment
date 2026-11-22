@@ -462,7 +462,7 @@ fn reconciled_refund_money(
             .filter(|&amt| amt > 0)
             .unwrap_or(payment.money.amount())
     };
-    Money::new(amount, payment.money.currency())
+    Money::new(amount, payment.money.currency().as_str())
 }
 
 fn build_reconciled_refund(

@@ -395,6 +395,7 @@ mod tests {
         amount: i64,
     }
 
+    #[derive(Debug)]
     struct FailingSerialize;
 
     impl Serialize for FailingSerialize {
