@@ -199,6 +199,8 @@ impl PaymentOrchestratorBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use async_trait::async_trait;
     use some_payment_core::{
         CreatePaymentRequest, ErrorKind, NormalizedWebhookEvent, PaymentResult, ProviderReference,
@@ -281,8 +283,12 @@ mod tests {
         );
         let moyasar = MockProvider::new("moyasar", PaymentCapabilities::DIRECT_PAYMENT);
         let empty = MockProvider::new("minimal", PaymentCapabilities::empty());
-        ProviderRegistry::new(vec![stripe, moyasar, empty], ProviderId::new("stripe"))
-            .expect("valid test registry")
+        let mut providers: HashMap<ProviderId, Arc<dyn PaymentProvider>> = HashMap::new();
+        for provider in [stripe, moyasar, empty] {
+            let id = provider.id().clone();
+            providers.insert(id, provider);
+        }
+        ProviderRegistry::new(providers, ProviderId::new("stripe")).expect("valid test registry")
     }
 
     #[test]
@@ -392,5 +398,28 @@ mod tests {
         assert_eq!(ctx.currency.as_ref().map(CurrencyCode::as_str), Some("SAR"));
         assert_eq!(ctx.buyer_country.as_deref(), Some("SA"));
         assert_eq!(ctx.required_capabilities, PaymentCapabilities::DIRECT_PAYMENT);
+    }
+
+    #[test]
+    fn builder_with_routing_policy_installs_route_resolver_and_builds() {
+        let stripe = MockProvider::new(
+            "stripe",
+            PaymentCapabilities::DIRECT_PAYMENT | PaymentCapabilities::HOSTED_CHECKOUT,
+        );
+        let moyasar = MockProvider::new("moyasar", PaymentCapabilities::DIRECT_PAYMENT);
+        let policy: Arc<dyn RoutingPolicy> = Arc::new(FixedPolicy {
+            target: ProviderId::new("moyasar"),
+        });
+
+        let builder = PaymentOrchestratorBuilder::new()
+            .register(stripe)
+            .expect("stripe registration must succeed")
+            .register(moyasar)
+            .expect("moyasar registration must succeed")
+            .default_provider(ProviderId::new("stripe"))
+            .with_routing_policy(policy);
+
+        assert!(format!("{builder:?}").contains("has_route_resolver: true"));
+        assert!(builder.build().is_ok());
     }
 }
