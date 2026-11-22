@@ -579,7 +579,7 @@ mod tests {
 
         let err = chain.run_before(&mut ctx).await.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::AbortedByHook);
-        match err {
+        match &err {
             PaymentError::AbortedByHook { reason } => assert_eq!(reason, "high_risk_score"),
             other => panic!("expected AbortedByHook, got {other:?}"),
         }
