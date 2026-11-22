@@ -22,7 +22,7 @@
 //! use some_payment_core::{Money, ProviderId};
 //!
 //! let money = Money::new(5000, "USD").unwrap();
-//! let mut ctx = HookContext::new(PaymentOperation::CreatePayment, ProviderId::new("stripe"))
+//! let mut ctx = HookContext::new(PaymentOperation::CreatePayment, ProviderId::new("alpha"))
 //!     .with_money(money)
 //!     .with_order_id("ord_123");
 //! ctx.insert_attribute("customer_ip", "203.0.113.42");
@@ -271,7 +271,7 @@ pub trait LifecycleHook: Send + Sync + fmt::Debug {
 /// #[tokio::main(flavor = "current_thread")]
 /// async fn main() {
 ///     let chain = HookChain::new(vec![Arc::new(TagHook)]);
-///     let mut ctx = HookContext::new(PaymentOperation::GetPayment, ProviderId::new("stripe"));
+///     let mut ctx = HookContext::new(PaymentOperation::GetPayment, ProviderId::new("alpha"));
 ///     chain.run_before(&mut ctx).await.unwrap();
 ///     assert_eq!(ctx.attributes().get("tagged").map(String::as_str), Some("true"));
 /// }
@@ -324,13 +324,7 @@ impl HookChain {
     pub async fn run_after(&self, ctx: &HookContext, result: &PaymentResult) {
         for hook in self.hooks.iter() {
             if let Err(err) = hook.after(ctx, result).await {
-                tracing::error!(
-                    hook = hook.name(),
-                    provider = %ctx.provider_id(),
-                    operation = ctx.operation().as_str(),
-                    error = %err,
-                    "reconciliation alert: after hook failed after provider succeeded"
-                );
+                log_reconciliation_alert(hook.name(), "after", ctx, &err);
             }
         }
     }
@@ -343,13 +337,7 @@ impl HookChain {
     pub async fn run_after_refund(&self, ctx: &HookContext, result: &RefundResult) {
         for hook in self.hooks.iter() {
             if let Err(err) = hook.after_refund(ctx, result).await {
-                tracing::error!(
-                    hook = hook.name(),
-                    provider = %ctx.provider_id(),
-                    operation = ctx.operation().as_str(),
-                    error = %err,
-                    "reconciliation alert: after_refund hook failed after provider succeeded"
-                );
+                log_reconciliation_alert(hook.name(), "after_refund", ctx, &err);
             }
         }
     }
@@ -360,6 +348,17 @@ impl HookChain {
             hook.on_error(ctx, error).await;
         }
     }
+}
+
+fn log_reconciliation_alert(hook: &str, phase: &str, ctx: &HookContext, err: &PaymentError) {
+    tracing::error!(
+        hook,
+        phase,
+        provider = %ctx.provider_id(),
+        operation = ctx.operation().as_str(),
+        error = %err,
+        "reconciliation alert: lifecycle hook failed after provider succeeded"
+    );
 }
 
 #[cfg(test)]
@@ -412,6 +411,19 @@ mod tests {
         fn record(&self, event: String) {
             self.events.lock().unwrap().push(event);
         }
+
+        fn record_and_maybe_fail(
+            &self,
+            phase: &str,
+            should_fail: bool,
+            msg: &str,
+        ) -> Result<(), PaymentError> {
+            self.record(format!("{phase}:{}", self.hook_name));
+            if should_fail {
+                return Err(PaymentError::configuration(msg));
+            }
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -434,11 +446,7 @@ mod tests {
             _ctx: &HookContext,
             _result: &PaymentResult,
         ) -> Result<(), PaymentError> {
-            self.record(format!("after:{}", self.hook_name));
-            if self.fail_after {
-                return Err(PaymentError::configuration("downstream ledger failed"));
-            }
-            Ok(())
+            self.record_and_maybe_fail("after", self.fail_after, "downstream ledger failed")
         }
 
         async fn after_refund(
@@ -446,11 +454,11 @@ mod tests {
             _ctx: &HookContext,
             _result: &RefundResult,
         ) -> Result<(), PaymentError> {
-            self.record(format!("after_refund:{}", self.hook_name));
-            if self.fail_after_refund {
-                return Err(PaymentError::configuration("refund ledger failed"));
-            }
-            Ok(())
+            self.record_and_maybe_fail(
+                "after_refund",
+                self.fail_after_refund,
+                "refund ledger failed",
+            )
         }
 
         async fn on_error(&self, _ctx: &HookContext, error: &PaymentError) {
@@ -458,14 +466,16 @@ mod tests {
         }
     }
 
-    fn sample_payment_result() -> PaymentResult {
-        let provider_id = ProviderId::new("stripe");
-        let reference = ProviderReference::builder(provider_id)
+    fn sample_reference() -> ProviderReference {
+        ProviderReference::builder(ProviderId::new("alpha"))
             .payment_id("pi_12345")
             .build()
-            .unwrap();
+            .unwrap()
+    }
+
+    fn sample_payment_result() -> PaymentResult {
         PaymentResult {
-            reference,
+            reference: sample_reference(),
             status: PaymentStatus::Paid,
             money: Money::new(2500, "USD").unwrap(),
             captured_amount: Some(2500),
@@ -477,14 +487,9 @@ mod tests {
     }
 
     fn sample_refund_result() -> RefundResult {
-        let provider_id = ProviderId::new("stripe");
-        let payment_reference = ProviderReference::builder(provider_id)
-            .payment_id("pi_12345")
-            .build()
-            .unwrap();
         RefundResult {
             refund_id: "re_98765".to_owned(),
-            payment_reference,
+            payment_reference: sample_reference(),
             status: RefundStatus::Succeeded,
             money: Money::new(1000, "USD").unwrap(),
             reason_detail: None,
@@ -504,7 +509,7 @@ mod tests {
     #[test]
     fn hook_context_builders_getters_and_redacted_debug() {
         let money = Money::new(9900, "USD").unwrap();
-        let mut ctx = HookContext::new(PaymentOperation::CreatePayment, ProviderId::new("stripe"))
+        let mut ctx = HookContext::new(PaymentOperation::CreatePayment, ProviderId::new("alpha"))
             .with_money(money)
             .with_order_id("ord_42")
             .with_reference_id("ref_99");
@@ -512,7 +517,7 @@ mod tests {
         ctx.insert_attribute("customer_email", "alice@example.com");
 
         assert_eq!(ctx.operation(), PaymentOperation::CreatePayment);
-        assert_eq!(ctx.provider_id().as_str(), "stripe");
+        assert_eq!(ctx.provider_id().as_str(), "alpha");
         assert_eq!(ctx.money().map(Money::amount), Some(9900));
         assert_eq!(ctx.order_id(), Some("ord_42"));
         assert_eq!(ctx.reference_id(), Some("ref_99"));
@@ -547,7 +552,7 @@ mod tests {
             Arc::new(RecordingHook::new("first", Arc::clone(&events))),
             Arc::new(RecordingHook::new("second", Arc::clone(&events))),
         ]);
-        let mut ctx = HookContext::new(PaymentOperation::CreatePayment, ProviderId::new("stripe"))
+        let mut ctx = HookContext::new(PaymentOperation::CreatePayment, ProviderId::new("alpha"))
             .with_money(Money::new(1500, "USD").unwrap());
 
         chain.run_before(&mut ctx).await.unwrap();
@@ -575,7 +580,7 @@ mod tests {
             Arc::new(RecordingHook::new("fraud", Arc::clone(&events)).aborting("high_risk_score")),
             Arc::new(RecordingHook::new("never_reached", Arc::clone(&events))),
         ]);
-        let mut ctx = HookContext::new(PaymentOperation::CreateCheckout, ProviderId::new("paymob"));
+        let mut ctx = HookContext::new(PaymentOperation::CreateCheckout, ProviderId::new("beta"));
 
         let err = chain.run_before(&mut ctx).await.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::AbortedByHook);
@@ -596,7 +601,7 @@ mod tests {
             Arc::new(RecordingHook::new("broken_ledger", Arc::clone(&events)).failing_after()),
             Arc::new(RecordingHook::new("metrics", Arc::clone(&events))),
         ]);
-        let ctx = HookContext::new(PaymentOperation::Capture, ProviderId::new("stripe"));
+        let ctx = HookContext::new(PaymentOperation::Capture, ProviderId::new("alpha"));
         let result = sample_payment_result();
 
         chain.run_after(&ctx, &result).await;
@@ -617,7 +622,7 @@ mod tests {
             ),
             Arc::new(RecordingHook::new("notify", Arc::clone(&events))),
         ]);
-        let ctx = HookContext::new(PaymentOperation::Refund, ProviderId::new("stripe"));
+        let ctx = HookContext::new(PaymentOperation::Refund, ProviderId::new("alpha"));
         let result = sample_refund_result();
 
         chain.run_after_refund(&ctx, &result).await;
@@ -638,7 +643,7 @@ mod tests {
             Arc::new(RecordingHook::new("alerting", Arc::clone(&events))),
             Arc::new(RecordingHook::new("metrics", Arc::clone(&events))),
         ]);
-        let ctx = HookContext::new(PaymentOperation::VoidPayment, ProviderId::new("moyasar"));
+        let ctx = HookContext::new(PaymentOperation::VoidPayment, ProviderId::new("gamma"));
         let error = PaymentError::configuration("missing api key");
 
         chain.run_on_error(&ctx, &error).await;
@@ -667,7 +672,7 @@ mod tests {
         let hook = NoopHook;
         assert_eq!(hook.name(), "noop");
 
-        let mut ctx = HookContext::new(PaymentOperation::GetPayment, ProviderId::new("stripe"));
+        let mut ctx = HookContext::new(PaymentOperation::GetPayment, ProviderId::new("alpha"));
         assert_eq!(hook.before(&mut ctx).await, HookDecision::Proceed);
 
         let payment_result = sample_payment_result();

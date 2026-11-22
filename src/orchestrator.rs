@@ -345,7 +345,9 @@ impl PaymentOrchestrator {
             &req.reference,
             req.amount.clone(),
         );
-        self.execute_refund_op(ctx, || provider.refund(req)).await
+        let (ctx, result) = self.execute_op(ctx, || provider.refund(req)).await?;
+        self.hooks.run_after_refund(&ctx, &result).await;
+        Ok(result)
     }
 
     fn resolve_for_request(
@@ -364,21 +366,18 @@ impl PaymentOrchestrator {
         Ok(self.registry.default_provider())
     }
 
-    async fn execute_payment_op<F, Fut>(
+    async fn execute_op<T, F, Fut>(
         &self,
         mut ctx: HookContext,
         call: F,
-    ) -> Result<PaymentResult, PaymentError>
+    ) -> Result<(HookContext, T), PaymentError>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<PaymentResult, PaymentError>>,
+        Fut: Future<Output = Result<T, PaymentError>>,
     {
         self.hooks.run_before(&mut ctx).await?;
         match call().await {
-            Ok(result) => {
-                self.hooks.run_after(&ctx, &result).await;
-                Ok(result)
-            }
+            Ok(result) => Ok((ctx, result)),
             Err(err) => {
                 self.hooks.run_on_error(&ctx, &err).await;
                 Err(err)
@@ -386,26 +385,18 @@ impl PaymentOrchestrator {
         }
     }
 
-    async fn execute_refund_op<F, Fut>(
+    async fn execute_payment_op<F, Fut>(
         &self,
-        mut ctx: HookContext,
+        ctx: HookContext,
         call: F,
-    ) -> Result<RefundResult, PaymentError>
+    ) -> Result<PaymentResult, PaymentError>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<RefundResult, PaymentError>>,
+        Fut: Future<Output = Result<PaymentResult, PaymentError>>,
     {
-        self.hooks.run_before(&mut ctx).await?;
-        match call().await {
-            Ok(result) => {
-                self.hooks.run_after_refund(&ctx, &result).await;
-                Ok(result)
-            }
-            Err(err) => {
-                self.hooks.run_on_error(&ctx, &err).await;
-                Err(err)
-            }
-        }
+        let (ctx, result) = self.execute_op(ctx, call).await?;
+        self.hooks.run_after(&ctx, &result).await;
+        Ok(result)
     }
 }
 
@@ -527,26 +518,30 @@ mod tests {
     }
 
     impl MockProvider {
-        fn new(slug: &str, capabilities: PaymentCapabilities) -> Arc<Self> {
-            Arc::new(Self {
+        fn new(slug: &str, capabilities: PaymentCapabilities) -> Self {
+            Self {
                 id: ProviderId::new(slug),
                 capabilities,
                 calls: AtomicUsize::new(0),
                 fail_provider: false,
-            })
+            }
         }
 
-        fn failing(slug: &str, capabilities: PaymentCapabilities) -> Arc<Self> {
-            Arc::new(Self {
-                id: ProviderId::new(slug),
-                capabilities,
-                calls: AtomicUsize::new(0),
-                fail_provider: true,
-            })
+        fn with_failure(mut self, fail_provider: bool) -> Self {
+            self.fail_provider = fail_provider;
+            self
         }
 
         fn call_count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        fn record_call(&self) -> Result<(), PaymentError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_provider {
+                return Err(self.provider_failure());
+            }
+            Ok(())
         }
 
         fn sample_payment_result(&self, status: PaymentStatus, money: Money) -> PaymentResult {
@@ -590,10 +585,7 @@ mod tests {
             &self,
             req: &CreatePaymentRequest,
         ) -> Result<PaymentResult, PaymentError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail_provider {
-                return Err(self.provider_failure());
-            }
+            self.record_call()?;
             Ok(self.sample_payment_result(PaymentStatus::Paid, req.money.clone()))
         }
 
@@ -601,10 +593,7 @@ mod tests {
             &self,
             req: &CheckoutSessionRequest,
         ) -> Result<PaymentResult, PaymentError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail_provider {
-                return Err(self.provider_failure());
-            }
+            self.record_call()?;
             Ok(self.sample_payment_result(PaymentStatus::RequiresAction, req.money.clone()))
         }
 
@@ -612,10 +601,7 @@ mod tests {
             &self,
             reference: &ProviderReference,
         ) -> Result<PaymentResult, PaymentError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail_provider {
-                return Err(self.provider_failure());
-            }
+            self.record_call()?;
             let money = Money::new(5_000, "SAR").unwrap();
             let mut result = self.sample_payment_result(PaymentStatus::Paid, money);
             result.reference = reference.clone();
@@ -623,10 +609,7 @@ mod tests {
         }
 
         async fn capture(&self, req: &CaptureRequest) -> Result<PaymentResult, PaymentError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail_provider {
-                return Err(self.provider_failure());
-            }
+            self.record_call()?;
             let money = req
                 .amount
                 .clone()
@@ -635,18 +618,13 @@ mod tests {
         }
 
         async fn void_payment(&self, _req: &VoidRequest) -> Result<PaymentResult, PaymentError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail_provider {
-                return Err(self.provider_failure());
-            }
-            Ok(self.sample_payment_result(PaymentStatus::Voided, Money::new(5_000, "SAR").unwrap()))
+            self.record_call()?;
+            let money = Money::new(5_000, "SAR").unwrap();
+            Ok(self.sample_payment_result(PaymentStatus::Voided, money))
         }
 
         async fn refund(&self, req: &RefundRequest) -> Result<RefundResult, PaymentError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail_provider {
-                return Err(self.provider_failure());
-            }
+            self.record_call()?;
             let money = req
                 .amount
                 .clone()
@@ -672,17 +650,43 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct RecordingHook {
+    struct TestHook {
         before: AtomicUsize,
         after: AtomicUsize,
         after_refund: AtomicUsize,
         on_error: AtomicUsize,
+        fail_after: bool,
+    }
+
+    impl TestHook {
+        fn recording() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        fn failing_after() -> Arc<Self> {
+            Arc::new(Self {
+                fail_after: true,
+                ..Self::default()
+            })
+        }
+
+        fn finish_after(&self, counter: &AtomicUsize) -> Result<(), PaymentError> {
+            counter.fetch_add(1, Ordering::SeqCst);
+            if self.fail_after {
+                return Err(PaymentError::configuration("ledger sink offline"));
+            }
+            Ok(())
+        }
     }
 
     #[async_trait]
-    impl LifecycleHook for RecordingHook {
+    impl LifecycleHook for TestHook {
         fn name(&self) -> &str {
-            "recording-hook"
+            if self.fail_after {
+                "failing-after-hook"
+            } else {
+                "recording-hook"
+            }
         }
 
         async fn before(&self, _ctx: &mut HookContext) -> HookDecision {
@@ -695,8 +699,7 @@ mod tests {
             _ctx: &HookContext,
             _result: &PaymentResult,
         ) -> Result<(), PaymentError> {
-            self.after.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            self.finish_after(&self.after)
         }
 
         async fn after_refund(
@@ -704,8 +707,7 @@ mod tests {
             _ctx: &HookContext,
             _result: &RefundResult,
         ) -> Result<(), PaymentError> {
-            self.after_refund.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            self.finish_after(&self.after_refund)
         }
 
         async fn on_error(&self, _ctx: &HookContext, _error: &PaymentError) {
@@ -724,37 +726,6 @@ mod tests {
 
         async fn before(&self, _ctx: &mut HookContext) -> HookDecision {
             HookDecision::Abort("fraud_score_high".to_owned())
-        }
-    }
-
-    #[derive(Debug, Default)]
-    struct FailingAfterHook {
-        after: AtomicUsize,
-        after_refund: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl LifecycleHook for FailingAfterHook {
-        fn name(&self) -> &str {
-            "failing-after-hook"
-        }
-
-        async fn after(
-            &self,
-            _ctx: &HookContext,
-            _result: &PaymentResult,
-        ) -> Result<(), PaymentError> {
-            self.after.fetch_add(1, Ordering::SeqCst);
-            Err(PaymentError::configuration("ledger sink offline"))
-        }
-
-        async fn after_refund(
-            &self,
-            _ctx: &HookContext,
-            _result: &RefundResult,
-        ) -> Result<(), PaymentError> {
-            self.after_refund.fetch_add(1, Ordering::SeqCst);
-            Err(PaymentError::configuration("ledger sink offline"))
         }
     }
 
@@ -821,10 +792,35 @@ mod tests {
         }
     }
 
+    fn outcome<T>(res: Result<T, PaymentError>) -> Result<(), ErrorKind> {
+        res.map(|_| ()).map_err(|e| e.kind())
+    }
+
+    async fn run_all_six_ops(
+        orch: &PaymentOrchestrator,
+        slug: &str,
+        explicit_provider: Option<&str>,
+    ) -> [Result<(), ErrorKind>; 6] {
+        let mut create_req = sample_create_req();
+        let mut checkout_req = sample_checkout_req();
+        if let Some(id) = explicit_provider {
+            create_req = create_req.with_provider_id(ProviderId::new(id));
+            checkout_req.provider_id = Some(ProviderId::new(id));
+        }
+        [
+            outcome(orch.create_payment(&create_req).await),
+            outcome(orch.create_checkout(&checkout_req).await),
+            outcome(orch.get_payment(&sample_ref(slug)).await),
+            outcome(orch.capture(&sample_capture_req(slug, None)).await),
+            outcome(orch.void_payment(&sample_void_req(slug)).await),
+            outcome(orch.refund(&sample_refund_req(slug, None)).await),
+        ]
+    }
+
     #[tokio::test]
     async fn tc_2_1_3_happy_path_all_six_operations() {
-        let provider = MockProvider::new("alpha", PaymentCapabilities::all());
-        let hook = Arc::new(RecordingHook::default());
+        let provider = Arc::new(MockProvider::new("alpha", PaymentCapabilities::all()));
+        let hook = TestHook::recording();
         let hooks = HookChain::new(vec![hook.clone()]);
         let orch = PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
@@ -861,39 +857,20 @@ mod tests {
 
     #[tokio::test]
     async fn ac_1_capability_guards_fail_closed_with_zero_provider_calls() {
-        let provider = MockProvider::new("limited", PaymentCapabilities::empty());
+        let provider = Arc::new(MockProvider::new("limited", PaymentCapabilities::empty()));
         let orch = PaymentOrchestrator::new(
             single_provider_registry(provider.clone()),
             HookChain::default(),
         );
 
-        let err = orch.create_payment(&sample_create_req()).await.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Unsupported);
-
-        let err = orch
-            .create_checkout(&sample_checkout_req())
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Unsupported);
-
-        let err = orch
-            .capture(&sample_capture_req("limited", None))
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Unsupported);
-
-        let err = orch
-            .void_payment(&sample_void_req("limited"))
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Unsupported);
-
-        let err = orch
-            .refund(&sample_refund_req("limited", None))
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Unsupported);
-
+        let results = [
+            outcome(orch.create_payment(&sample_create_req()).await),
+            outcome(orch.create_checkout(&sample_checkout_req()).await),
+            outcome(orch.capture(&sample_capture_req("limited", None)).await),
+            outcome(orch.void_payment(&sample_void_req("limited")).await),
+            outcome(orch.refund(&sample_refund_req("limited", None)).await),
+        ];
+        assert_eq!(results, [Err(ErrorKind::Unsupported); 5]);
         assert_eq!(provider.call_count(), 0);
     }
 
@@ -903,7 +880,7 @@ mod tests {
             | PaymentCapabilities::HOSTED_CHECKOUT
             | PaymentCapabilities::AUTH_CAPTURE
             | PaymentCapabilities::REFUND;
-        let provider = MockProvider::new("base", base_caps);
+        let provider = Arc::new(MockProvider::new("base", base_caps));
         let orch = PaymentOrchestrator::new(
             single_provider_registry(provider.clone()),
             HookChain::default(),
@@ -915,52 +892,30 @@ mod tests {
             amount: 2_000,
             fee_source: false,
         });
-        assert_eq!(
-            orch.create_payment(&split_req).await.unwrap_err().kind(),
-            ErrorKind::Unsupported
-        );
-        assert_eq!(
-            orch.capture(&sample_capture_req("base", Some(sample_money())))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::Unsupported
-        );
-        assert_eq!(
-            orch.refund(&sample_refund_req("base", Some(sample_money())))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::Unsupported
-        );
+        let cap_req = sample_capture_req("base", Some(sample_money()));
+        let ref_req = sample_refund_req("base", Some(sample_money()));
+        let base_results = [
+            outcome(orch.create_payment(&split_req).await),
+            outcome(orch.capture(&cap_req).await),
+            outcome(orch.refund(&ref_req).await),
+        ];
+        assert_eq!(base_results, [Err(ErrorKind::Unsupported); 3]);
 
-        let no_auth = MockProvider::new(
-            "no-auth",
-            PaymentCapabilities::DIRECT_PAYMENT | PaymentCapabilities::HOSTED_CHECKOUT,
-        );
+        let no_auth_caps =
+            PaymentCapabilities::DIRECT_PAYMENT | PaymentCapabilities::HOSTED_CHECKOUT;
+        let no_auth = Arc::new(MockProvider::new("no-auth", no_auth_caps));
         let no_auth_orch = PaymentOrchestrator::new(
             single_provider_registry(no_auth.clone()),
             HookChain::default(),
         );
         let manual_pay = sample_create_req().with_capture_mode(CaptureMode::Manual);
-        assert_eq!(
-            no_auth_orch
-                .create_payment(&manual_pay)
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::Unsupported
-        );
         let mut manual_checkout = sample_checkout_req();
         manual_checkout.capture_mode = CaptureMode::Manual;
-        assert_eq!(
-            no_auth_orch
-                .create_checkout(&manual_checkout)
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::Unsupported
-        );
+        let manual_results = [
+            outcome(no_auth_orch.create_payment(&manual_pay).await),
+            outcome(no_auth_orch.create_checkout(&manual_checkout).await),
+        ];
+        assert_eq!(manual_results, [Err(ErrorKind::Unsupported); 2]);
 
         assert_eq!(provider.call_count(), 0);
         assert_eq!(no_auth.call_count(), 0);
@@ -968,77 +923,23 @@ mod tests {
 
     #[tokio::test]
     async fn ac_2_before_hook_abort_prevents_provider_calls_across_all_six_ops() {
-        let provider = MockProvider::new("alpha", PaymentCapabilities::all());
+        let provider = Arc::new(MockProvider::new("alpha", PaymentCapabilities::all()));
         let hooks = HookChain::new(vec![Arc::new(AbortingHook)]);
         let orch = PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
-        assert_eq!(
-            orch.create_payment(&sample_create_req())
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::AbortedByHook
-        );
-        assert_eq!(
-            orch.create_checkout(&sample_checkout_req())
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::AbortedByHook
-        );
-        assert_eq!(
-            orch.get_payment(&sample_ref("alpha"))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::AbortedByHook
-        );
-        assert_eq!(
-            orch.capture(&sample_capture_req("alpha", None))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::AbortedByHook
-        );
-        assert_eq!(
-            orch.void_payment(&sample_void_req("alpha"))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::AbortedByHook
-        );
-        assert_eq!(
-            orch.refund(&sample_refund_req("alpha", None))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::AbortedByHook
-        );
+        let results = run_all_six_ops(&orch, "alpha", None).await;
+        assert_eq!(results, [Err(ErrorKind::AbortedByHook); 6]);
         assert_eq!(provider.call_count(), 0);
     }
 
     #[tokio::test]
     async fn ac_3_failing_after_hook_preserves_ok_results() {
-        let provider = MockProvider::new("alpha", PaymentCapabilities::all());
-        let failing_hook = Arc::new(FailingAfterHook::default());
+        let provider = Arc::new(MockProvider::new("alpha", PaymentCapabilities::all()));
+        let failing_hook = TestHook::failing_after();
         let hooks = HookChain::new(vec![failing_hook.clone()]);
         let orch = PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
-        assert!(orch.create_payment(&sample_create_req()).await.is_ok());
-        assert!(orch.create_checkout(&sample_checkout_req()).await.is_ok());
-        assert!(orch.get_payment(&sample_ref("alpha")).await.is_ok());
-        assert!(
-            orch.capture(&sample_capture_req("alpha", None))
-                .await
-                .is_ok()
-        );
-        assert!(orch.void_payment(&sample_void_req("alpha")).await.is_ok());
-        assert!(
-            orch.refund(&sample_refund_req("alpha", None))
-                .await
-                .is_ok()
-        );
-
+        assert_eq!(run_all_six_ops(&orch, "alpha", None).await, [Ok(()); 6]);
         assert_eq!(provider.call_count(), 6);
         assert_eq!(failing_hook.after.load(Ordering::SeqCst), 5);
         assert_eq!(failing_hook.after_refund.load(Ordering::SeqCst), 1);
@@ -1046,54 +947,14 @@ mod tests {
 
     #[tokio::test]
     async fn on_error_hook_fires_on_provider_failure_across_all_six_ops() {
-        let provider = MockProvider::failing("alpha", PaymentCapabilities::all());
-        let hook = Arc::new(RecordingHook::default());
+        let mock = MockProvider::new("alpha", PaymentCapabilities::all()).with_failure(true);
+        let provider = Arc::new(mock);
+        let hook = TestHook::recording();
         let hooks = HookChain::new(vec![hook.clone()]);
         let orch = PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
-        assert_eq!(
-            orch.create_payment(&sample_create_req())
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::ProviderUnavailable
-        );
-        assert_eq!(
-            orch.create_checkout(&sample_checkout_req())
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::ProviderUnavailable
-        );
-        assert_eq!(
-            orch.get_payment(&sample_ref("alpha"))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::ProviderUnavailable
-        );
-        assert_eq!(
-            orch.capture(&sample_capture_req("alpha", None))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::ProviderUnavailable
-        );
-        assert_eq!(
-            orch.void_payment(&sample_void_req("alpha"))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::ProviderUnavailable
-        );
-        assert_eq!(
-            orch.refund(&sample_refund_req("alpha", None))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::ProviderUnavailable
-        );
-
+        let results = run_all_six_ops(&orch, "alpha", None).await;
+        assert_eq!(results, [Err(ErrorKind::ProviderUnavailable); 6]);
         assert_eq!(provider.call_count(), 6);
         assert_eq!(hook.before.load(Ordering::SeqCst), 6);
         assert_eq!(hook.after.load(Ordering::SeqCst), 0);
@@ -1103,64 +964,21 @@ mod tests {
 
     #[tokio::test]
     async fn ac_4_unknown_provider_id_returns_configuration_error() {
-        let provider = MockProvider::new("alpha", PaymentCapabilities::all());
+        let provider = Arc::new(MockProvider::new("alpha", PaymentCapabilities::all()));
         let orch = PaymentOrchestrator::new(
             single_provider_registry(provider.clone()),
             HookChain::default(),
         );
 
-        let create_req = sample_create_req().with_provider_id(ProviderId::new("unknown"));
-        assert_eq!(
-            orch.create_payment(&create_req).await.unwrap_err().kind(),
-            ErrorKind::Configuration
-        );
-
-        let mut checkout_req = sample_checkout_req();
-        checkout_req.provider_id = Some(ProviderId::new("unknown"));
-        assert_eq!(
-            orch.create_checkout(&checkout_req)
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::Configuration
-        );
-
-        assert_eq!(
-            orch.get_payment(&sample_ref("unknown"))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::Configuration
-        );
-        assert_eq!(
-            orch.capture(&sample_capture_req("unknown", None))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::Configuration
-        );
-        assert_eq!(
-            orch.void_payment(&sample_void_req("unknown"))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::Configuration
-        );
-        assert_eq!(
-            orch.refund(&sample_refund_req("unknown", None))
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::Configuration
-        );
-
+        let results = run_all_six_ops(&orch, "unknown", Some("unknown")).await;
+        assert_eq!(results, [Err(ErrorKind::Configuration); 6]);
         assert_eq!(provider.call_count(), 0);
     }
 
     #[tokio::test]
     async fn explicit_provider_id_takes_precedence_over_route_resolver() {
-        let primary = MockProvider::new("primary", PaymentCapabilities::all());
-        let secondary = MockProvider::new("secondary", PaymentCapabilities::all());
+        let primary = Arc::new(MockProvider::new("primary", PaymentCapabilities::all()));
+        let secondary = Arc::new(MockProvider::new("secondary", PaymentCapabilities::all()));
         let mut map: HashMap<ProviderId, Arc<dyn PaymentProvider>> = HashMap::new();
         map.insert(primary.id().clone(), primary.clone());
         map.insert(secondary.id().clone(), secondary.clone());
@@ -1185,24 +1003,18 @@ mod tests {
 
     #[tokio::test]
     async fn validation_error_short_circuits_before_provider_and_hooks() {
-        let provider = MockProvider::new("alpha", PaymentCapabilities::all());
-        let hook = Arc::new(RecordingHook::default());
+        let provider = Arc::new(MockProvider::new("alpha", PaymentCapabilities::all()));
+        let hook = TestHook::recording();
         let hooks = HookChain::new(vec![hook.clone()]);
         let orch: PaymentHub =
             PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
         let bad_create = CreatePaymentRequest::new(sample_money(), "   ");
-        assert_eq!(
-            orch.create_payment(&bad_create).await.unwrap_err().kind(),
-            ErrorKind::Validation
-        );
+        assert_eq!(outcome(orch.create_payment(&bad_create).await), Err(ErrorKind::Validation));
 
         let mut bad_capture = sample_capture_req("alpha", None);
         bad_capture.idempotency_key = Some("   ".to_owned());
-        assert_eq!(
-            orch.capture(&bad_capture).await.unwrap_err().kind(),
-            ErrorKind::Validation
-        );
+        assert_eq!(outcome(orch.capture(&bad_capture).await), Err(ErrorKind::Validation));
 
         assert_eq!(provider.call_count(), 0);
         assert_eq!(hook.before.load(Ordering::SeqCst), 0);

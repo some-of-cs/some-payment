@@ -236,7 +236,7 @@ mod tests {
     }
 
     impl MockProvider {
-        fn new(slug: &str, capabilities: PaymentCapabilities) -> Arc<dyn PaymentProvider> {
+        fn arc(slug: &str, capabilities: PaymentCapabilities) -> Arc<dyn PaymentProvider> {
             Arc::new(Self {
                 id: ProviderId::new(slug),
                 capabilities,
@@ -283,21 +283,21 @@ mod tests {
         let mut providers = HashMap::new();
         providers.insert(
             ProviderId::new("zeta"),
-            MockProvider::new(
+            MockProvider::arc(
                 "zeta",
                 PaymentCapabilities::DIRECT_PAYMENT | PaymentCapabilities::REFUND,
             ),
         );
         providers.insert(
             ProviderId::new("alpha"),
-            MockProvider::new(
+            MockProvider::arc(
                 "alpha",
                 PaymentCapabilities::HOSTED_CHECKOUT | PaymentCapabilities::REFUND,
             ),
         );
         providers.insert(
             ProviderId::new("beta"),
-            MockProvider::new(
+            MockProvider::arc(
                 "beta",
                 PaymentCapabilities::DIRECT_PAYMENT
                     | PaymentCapabilities::HOSTED_CHECKOUT
@@ -318,7 +318,7 @@ mod tests {
         let mut providers = HashMap::new();
         providers.insert(
             ProviderId::new("alpha"),
-            MockProvider::new("alpha", PaymentCapabilities::DIRECT_PAYMENT),
+            MockProvider::arc("alpha", PaymentCapabilities::DIRECT_PAYMENT),
         );
         let err = ProviderRegistry::new(providers, ProviderId::new("missing")).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Configuration);

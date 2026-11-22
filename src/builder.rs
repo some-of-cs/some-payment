@@ -170,7 +170,8 @@ impl PaymentOrchestratorBuilder {
         let default_id = resolve_default_id(&self.providers, self.default_id)?;
         let registry = ProviderRegistry::new(self.providers, default_id)?;
         let hooks = HookChain::new(self.hooks);
-        Ok(PaymentOrchestrator::from_parts(registry, hooks, self.route_resolver))
+        let orch = PaymentOrchestrator::from_parts(registry, hooks, self.route_resolver);
+        Ok(orch)
     }
 }
 
@@ -266,83 +267,71 @@ mod tests {
     struct NoOpHook;
 
     #[async_trait]
-    impl LifecycleHook for NoOpHook {}
+    impl LifecycleHook for NoOpHook {
+        fn name(&self) -> &str {
+            "no_op_hook"
+        }
+    }
 
     fn mock_provider(slug: &str) -> Arc<dyn PaymentProvider> {
         Arc::new(MockProvider(ProviderId::new(slug)))
     }
 
+    fn builder_with(slugs: &[&str]) -> PaymentOrchestratorBuilder {
+        let mut builder = PaymentOrchestrator::builder();
+        for slug in slugs {
+            builder = builder.register(mock_provider(slug)).unwrap();
+        }
+        builder
+    }
+
+    fn assert_config_err<T: fmt::Debug>(res: Result<T, PaymentError>) {
+        assert_eq!(res.unwrap_err().kind(), ErrorKind::Configuration);
+    }
+
     #[test]
     fn empty_registry_fails_with_configuration_error() {
-        let err = PaymentOrchestrator::builder().build().unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Configuration);
+        assert_config_err(PaymentOrchestrator::builder().build());
     }
 
     #[test]
     fn duplicate_provider_registration_fails_with_configuration_error() {
-        let builder = PaymentOrchestrator::builder()
-            .register(mock_provider("alpha"))
-            .expect("initial registration succeeds");
-        let err = builder.register(mock_provider("ALPHA")).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Configuration);
+        let res = builder_with(&["alpha"]).register(mock_provider("ALPHA"));
+        assert_config_err(res);
     }
 
     #[test]
     fn invalid_default_provider_fails_with_configuration_error() {
-        let err = PaymentOrchestrator::builder()
-            .register(mock_provider("alpha"))
-            .expect("registration succeeds")
+        let res = builder_with(&["alpha"])
             .default_provider(ProviderId::new("unknown"))
-            .build()
-            .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Configuration);
+            .build();
+        assert_config_err(res);
     }
 
     #[test]
     fn multi_provider_without_explicit_default_fails_with_configuration_error() {
-        let err = PaymentOrchestrator::builder()
-            .register(mock_provider("alpha"))
-            .expect("first registration succeeds")
-            .register(mock_provider("beta"))
-            .expect("second registration succeeds")
-            .build()
-            .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Configuration);
+        assert_config_err(builder_with(&["alpha", "beta"]).build());
     }
 
     #[test]
     fn single_provider_auto_defaults_and_builds_cleanly() {
-        let orchestrator = PaymentOrchestrator::builder()
-            .register(mock_provider("alpha"))
-            .expect("registration succeeds")
-            .build();
-        assert!(orchestrator.is_ok());
+        assert!(builder_with(&["alpha"]).build().is_ok());
     }
 
     #[test]
     fn multi_provider_with_valid_default_and_hook_builds_cleanly() {
-        let hook: Arc<dyn LifecycleHook> = Arc::new(NoOpHook);
-        let orchestrator = PaymentOrchestratorBuilder::new()
-            .register(mock_provider("alpha"))
-            .expect("first registration succeeds")
-            .register(mock_provider("beta"))
-            .expect("second registration succeeds")
+        let res = builder_with(&["alpha", "beta"])
             .default_provider(ProviderId::new("beta"))
-            .with_hook(hook)
+            .with_hook(Arc::new(NoOpHook))
             .build();
-        assert!(orchestrator.is_ok());
+        assert!(res.is_ok());
     }
 
     #[test]
     fn debug_output_formats_metadata_deterministically() {
-        let hook: Arc<dyn LifecycleHook> = Arc::new(NoOpHook);
-        let builder = PaymentOrchestrator::builder()
-            .register(mock_provider("beta"))
-            .expect("first registration succeeds")
-            .register(mock_provider("alpha"))
-            .expect("second registration succeeds")
+        let builder = builder_with(&["beta", "alpha"])
             .default_provider(ProviderId::new("alpha"))
-            .with_hook(hook);
+            .with_hook(Arc::new(NoOpHook));
         let rendered = format!("{builder:?}");
         assert!(rendered.contains("PaymentOrchestratorBuilder"));
         assert!(rendered.contains(r#"provider_ids: ["alpha", "beta"]"#));
@@ -355,12 +344,8 @@ mod tests {
         let resolver: RouteResolver = Arc::new(|reg, _explicit, _currency, _country, _caps| {
             reg.require(&ProviderId::new("alpha"))
         });
-        let builder = PaymentOrchestrator::builder()
-            .register(mock_provider("alpha"))
-            .expect("registration succeeds")
-            .with_route_resolver(resolver);
-        let rendered = format!("{builder:?}");
-        assert!(rendered.contains("has_route_resolver: true"));
+        let builder = builder_with(&["alpha"]).with_route_resolver(resolver);
+        assert!(format!("{builder:?}").contains("has_route_resolver: true"));
         assert!(builder.build().is_ok());
     }
 }
