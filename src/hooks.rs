@@ -220,11 +220,7 @@ pub trait LifecycleHook: Send + Sync + fmt::Debug {
     ///
     /// Returning `Err` triggers a structured reconciliation alert via [`tracing::error!`]
     /// without reversing or masking the provider's [`PaymentResult`].
-    async fn after(
-        &self,
-        _ctx: &HookContext,
-        _result: &PaymentResult,
-    ) -> Result<(), PaymentError> {
+    async fn after(&self, _ctx: &HookContext, _result: &PaymentResult) -> Result<(), PaymentError> {
         Ok(())
     }
 
@@ -654,5 +650,33 @@ mod tests {
                 "on_error:metrics:Configuration".to_owned(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn default_lifecycle_hook_methods_are_noops() {
+        #[derive(Debug)]
+        struct NoopHook;
+
+        #[async_trait]
+        impl LifecycleHook for NoopHook {
+            fn name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        let hook = NoopHook;
+        assert_eq!(hook.name(), "noop");
+
+        let mut ctx = HookContext::new(PaymentOperation::GetPayment, ProviderId::new("stripe"));
+        assert_eq!(hook.before(&mut ctx).await, HookDecision::Proceed);
+
+        let payment_result = sample_payment_result();
+        assert!(hook.after(&ctx, &payment_result).await.is_ok());
+
+        let refund_result = sample_refund_result();
+        assert!(hook.after_refund(&ctx, &refund_result).await.is_ok());
+
+        let error = PaymentError::configuration("noop error");
+        hook.on_error(&ctx, &error).await;
     }
 }
