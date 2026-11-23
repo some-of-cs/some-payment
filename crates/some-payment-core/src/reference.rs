@@ -335,7 +335,7 @@ mod tests {
             "pay%2f123",
             "pay\r123",
             "pay\n123",
-            "pay\0123",
+            "pay\x00123",
             "pay 123",
             "pay\u{202E}123",
         ];

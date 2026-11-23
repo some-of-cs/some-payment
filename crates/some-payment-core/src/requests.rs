@@ -1031,7 +1031,7 @@ mod tests {
         for bad_order in [
             "ORD\r1",
             "ORD\n1",
-            "ORD\01",
+            "ORD\x001",
             &format!("{}O", " ".repeat(256)),
         ] {
             let req = CreatePaymentRequest::new(money.clone(), bad_order);
