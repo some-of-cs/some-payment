@@ -1,6 +1,6 @@
 //! Canonical payment results, [`PaymentStatus`], [`NextAction`], and webhook DTOs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -295,8 +295,32 @@ impl Drop for RawWebhookRequest {
     }
 }
 
+fn normalize_headers_fail_closed(headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut normalized = BTreeMap::new();
+    let mut collided = BTreeSet::new();
+    for (key, mut value) in headers {
+        let lower = key.to_ascii_lowercase();
+        if collided.contains(&lower) {
+            value.zeroize();
+            continue;
+        }
+        if let Some(mut prev) = normalized.remove(&lower) {
+            prev.zeroize();
+            value.zeroize();
+            collided.insert(lower);
+            continue;
+        }
+        normalized.insert(lower, value);
+    }
+    normalized
+}
+
 impl RawWebhookRequest {
     /// Constructs a [`RawWebhookRequest`], normalizing all header keys to ASCII lowercase.
+    ///
+    /// Any headers whose keys collide case-insensitively (e.g., `"Stripe-Signature"` and
+    /// `"stripe-signature"`) are excluded so both [`Self::header`] and direct map lookups
+    /// fail closed with `None`.
     #[must_use]
     pub fn new(
         method: HttpMethod,
@@ -304,13 +328,9 @@ impl RawWebhookRequest {
         headers: BTreeMap<String, String>,
         query_params: BTreeMap<String, String>,
     ) -> Self {
-        let normalized_headers = headers
-            .into_iter()
-            .map(|(k, v)| (k.to_ascii_lowercase(), v))
-            .collect();
         Self {
             raw_body,
-            headers: normalized_headers,
+            headers: normalize_headers_fail_closed(headers),
             query_params,
             method,
         }
@@ -485,6 +505,27 @@ mod tests {
             method: HttpMethod::Post,
         };
         assert_eq!(dup_raw.header("stripe-signature"), None);
+    }
+
+    #[test]
+    fn raw_webhook_request_new_excludes_case_duplicate_headers() {
+        let mut two_way = BTreeMap::new();
+        two_way.insert("Stripe-Signature".into(), "t=1,v1=valid".into());
+        two_way.insert("stripe-signature".into(), "t=1,v1=spoofed".into());
+        two_way.insert("X-Request-Id".into(), "req_123".into());
+        let req = RawWebhookRequest::new(HttpMethod::Post, Vec::new(), two_way, BTreeMap::new());
+        assert!(req.header("stripe-signature").is_none());
+        assert!(req.header("Stripe-Signature").is_none());
+        assert!(req.headers.get("stripe-signature").is_none());
+        assert_eq!(req.header("x-request-id"), Some("req_123"));
+
+        let mut three_way = BTreeMap::new();
+        three_way.insert("STRIPE-SIGNATURE".into(), "t=1,v1=first".into());
+        three_way.insert("Stripe-Signature".into(), "t=1,v1=second".into());
+        three_way.insert("stripe-signature".into(), "t=1,v1=third".into());
+        let req3 = RawWebhookRequest::new(HttpMethod::Post, Vec::new(), three_way, BTreeMap::new());
+        assert!(req3.header("stripe-signature").is_none());
+        assert!(req3.headers.get("stripe-signature").is_none());
     }
 
     #[test]
