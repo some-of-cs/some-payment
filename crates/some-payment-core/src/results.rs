@@ -516,7 +516,7 @@ mod tests {
         let req = RawWebhookRequest::new(HttpMethod::Post, Vec::new(), two_way, BTreeMap::new());
         assert!(req.header("stripe-signature").is_none());
         assert!(req.header("Stripe-Signature").is_none());
-        assert!(req.headers.get("stripe-signature").is_none());
+        assert!(!req.headers.contains_key("stripe-signature"));
         assert_eq!(req.header("x-request-id"), Some("req_123"));
 
         let mut three_way = BTreeMap::new();
@@ -525,7 +525,7 @@ mod tests {
         three_way.insert("stripe-signature".into(), "t=1,v1=third".into());
         let req3 = RawWebhookRequest::new(HttpMethod::Post, Vec::new(), three_way, BTreeMap::new());
         assert!(req3.header("stripe-signature").is_none());
-        assert!(req3.headers.get("stripe-signature").is_none());
+        assert!(!req3.headers.contains_key("stripe-signature"));
     }
 
     #[test]
