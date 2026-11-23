@@ -249,7 +249,10 @@ fn select_from_table<T: RouteTable>(
     ctx: &RoutingContext,
     registry: &ProviderRegistry,
 ) -> Result<ProviderId, PaymentError> {
-    let currency = ctx.currency.as_ref().and_then(|code| table.currency(code.as_str()));
+    let currency = ctx
+        .currency
+        .as_ref()
+        .and_then(|code| table.currency(code.as_str()));
     let country = ctx
         .buyer_country
         .as_deref()
