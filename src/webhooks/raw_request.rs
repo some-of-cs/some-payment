@@ -133,8 +133,9 @@ impl fmt::Debug for ValidatedRawWebhook {
 /// # Errors
 ///
 /// Returns [`PaymentError::ValidationError`] if the parameter count exceeds
-/// [`MAX_QUERY_PARAM_COUNT`], a key is empty, a percent-escape sequence is
-/// malformed, or the decoded bytes are not valid UTF-8.
+/// [`MAX_QUERY_PARAM_COUNT`], a key is empty, a key is duplicated, a
+/// percent-escape sequence is malformed, or the decoded bytes are not valid
+/// UTF-8.
 ///
 /// # Examples
 ///
@@ -156,6 +157,11 @@ pub fn parse_query_string(raw_query: &str) -> Result<BTreeMap<String, String>, P
             )));
         }
         let (key, value) = parse_query_pair(segment)?;
+        if params.contains_key(&key) {
+            return Err(PaymentError::validation(
+                "duplicate webhook query parameter key",
+            ));
+        }
         params.insert(key, value);
     }
     Ok(params)
@@ -389,5 +395,19 @@ mod tests {
         assert!(dbg.contains("ValidatedRawWebhook"));
         assert!(dbg.contains("raw_body_len"));
         assert!(dbg.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn parse_query_string_rejects_duplicate_keys_with_conflicting_values() {
+        let err = parse_query_string("?hmac=FORGED&hmac=VALID")
+            .expect_err("conflicting duplicate query key must fail");
+        assert_eq!(err.kind(), ErrorKind::Validation);
+    }
+
+    #[test]
+    fn parse_query_string_rejects_duplicate_keys_with_identical_values() {
+        let err = parse_query_string("?hmac=VALID&id=1&hmac=VALID")
+            .expect_err("identical duplicate query key must fail");
+        assert_eq!(err.kind(), ErrorKind::Validation);
     }
 }

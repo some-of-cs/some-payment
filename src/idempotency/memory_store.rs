@@ -219,6 +219,9 @@ impl InMemoryIdempotencyStore {
         evict_expired(&mut entries, now);
 
         let store_key = (entry.scope.to_owned(), entry.key.to_owned());
+        if is_completed(entries.get(&store_key)) {
+            return Ok(());
+        }
         if !entries.contains_key(&store_key) && entries.len() >= self.max_capacity {
             return Err(PaymentError::configuration(
                 "in-memory idempotency store capacity reached",
@@ -268,9 +271,32 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
     async fn release(&self, scope: &str, key: &str) -> Result<(), PaymentError> {
         validate_scope_and_key(scope, key)?;
         let mut entries = self.lock_entries()?;
-        entries.remove(&(scope.to_owned(), key.to_owned()));
+        let store_key = (scope.to_owned(), key.to_owned());
+        if is_in_progress(entries.get(&store_key)) {
+            entries.remove(&store_key);
+        }
         Ok(())
     }
+}
+
+fn is_completed(record: Option<&StoredRecord>) -> bool {
+    matches!(
+        record,
+        Some(StoredRecord {
+            state: EntryState::Completed(_),
+            ..
+        })
+    )
+}
+
+fn is_in_progress(record: Option<&StoredRecord>) -> bool {
+    matches!(
+        record,
+        Some(StoredRecord {
+            state: EntryState::InProgress,
+            ..
+        })
+    )
 }
 
 fn validate_scope_and_key(scope: &str, key: &str) -> Result<(), PaymentError> {
@@ -567,5 +593,39 @@ mod tests {
         assert_eq!(store.len(), 0);
         assert!(store.is_empty());
         assert!(format!("{store:?}").contains("InMemoryIdempotencyStore"));
+    }
+
+    #[tokio::test]
+    async fn release_does_not_delete_completed_entry() {
+        let store = InMemoryIdempotencyStore::new();
+        let entry = IdempotencyEntry::new("scope", "completed-key", 300);
+        let payload = serde_json::json!({"status": "settled"});
+
+        store.reserve(&entry).await.unwrap();
+        store.complete(&entry, &payload).await.unwrap();
+        store.release("scope", "completed-key").await.unwrap();
+
+        let outcome = store.reserve(&entry).await.unwrap();
+        assert_eq!(outcome, ReserveOutcome::Completed(payload));
+    }
+
+    #[test]
+    fn complete_at_does_not_overwrite_existing_completed_entry() {
+        let store = InMemoryIdempotencyStore::new();
+        let entry = IdempotencyEntry::new("scope", "immutable-key", 300);
+        let first_payload = serde_json::json!({"payment_id": "pay_first"});
+        let second_payload = serde_json::json!({"payment_id": "pay_second"});
+        let t0 = Instant::now();
+
+        store.reserve_at(&entry, t0).unwrap();
+        store.complete_at(&entry, &first_payload, t0).unwrap();
+        store
+            .complete_at(&entry, &second_payload, t0 + Duration::from_secs(1))
+            .unwrap();
+
+        let outcome = store
+            .reserve_at(&entry, t0 + Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(outcome, ReserveOutcome::Completed(first_payload));
     }
 }

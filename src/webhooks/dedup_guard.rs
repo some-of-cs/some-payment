@@ -101,7 +101,7 @@ pub trait WebhookDeduplicationStore: Send + Sync {
 /// use some_payment::webhooks::dedup_guard::{InMemoryDedupStore, WebhookDeduplicationStore};
 /// use some_payment_core::ProviderId;
 ///
-/// let store = InMemoryDedupStore::with_limits(100, 3_600);
+/// let store = InMemoryDedupStore::with_limits(100, 3_600).unwrap();
 /// let moyasar = ProviderId::new("moyasar");
 /// assert!(store.is_empty());
 /// assert!(store.record_if_new(&moyasar, "evt_001").await.unwrap());
@@ -119,18 +119,36 @@ impl InMemoryDedupStore {
     /// and [`DEFAULT_DEDUP_TTL_SECS`].
     #[must_use]
     pub fn new() -> Self {
-        Self::with_limits(DEFAULT_DEDUP_CAPACITY, DEFAULT_DEDUP_TTL_SECS)
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            max_capacity: DEFAULT_DEDUP_CAPACITY,
+            ttl: Duration::from_secs(DEFAULT_DEDUP_TTL_SECS),
+        }
     }
 
     /// Creates a new [`InMemoryDedupStore`] with explicit capacity and TTL
     /// bounds.
-    #[must_use]
-    pub fn with_limits(max_capacity: usize, ttl_secs: u64) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ConfigurationError`] if `max_capacity` is `0` or
+    /// `ttl_secs` is `0`.
+    pub fn with_limits(max_capacity: usize, ttl_secs: u64) -> Result<Self, PaymentError> {
+        if max_capacity == 0 {
+            return Err(PaymentError::configuration(
+                "webhook deduplication store max_capacity must be greater than zero",
+            ));
+        }
+        if ttl_secs == 0 {
+            return Err(PaymentError::configuration(
+                "webhook deduplication store ttl_secs must be greater than zero",
+            ));
+        }
+        Ok(Self {
             entries: Mutex::new(HashMap::new()),
             max_capacity,
             ttl: Duration::from_secs(ttl_secs),
-        }
+        })
     }
 
     /// Returns the number of currently active (non-expired) deduplication
@@ -353,19 +371,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dedup_enforces_capacity_and_ttl_expiry() {
-        let bounded = InMemoryDedupStore::with_limits(2, 60);
+    async fn dedup_enforces_capacity_limit() {
+        let bounded = InMemoryDedupStore::with_limits(2, 60).unwrap();
         let stripe = ProviderId::new("stripe");
 
         assert!(bounded.record_if_new(&stripe, "evt_1").await.unwrap());
         assert!(bounded.record_if_new(&stripe, "evt_2").await.unwrap());
         let err = bounded.record_if_new(&stripe, "evt_3").await.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Validation);
+    }
 
-        let zero_ttl = InMemoryDedupStore::with_limits(1, 0);
-        assert!(zero_ttl.record_if_new(&stripe, "evt_a").await.unwrap());
-        assert!(zero_ttl.record_if_new(&stripe, "evt_b").await.unwrap());
-        assert!(zero_ttl.record_if_new(&stripe, "evt_a").await.unwrap());
+    #[tokio::test]
+    async fn dedup_evicts_expired_entries() {
+        let store = InMemoryDedupStore::with_limits(1, 60).unwrap();
+        let stripe = ProviderId::new("stripe");
+        let expired = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        store
+            .entries
+            .lock()
+            .unwrap()
+            .insert((stripe.clone(), "evt_a".to_owned()), expired);
+
+        assert!(store.record_if_new(&stripe, "evt_a").await.unwrap());
+    }
+
+    #[test]
+    fn with_limits_rejects_zero_capacity_and_zero_ttl() {
+        let zero_cap = InMemoryDedupStore::with_limits(0, 60)
+            .expect_err("zero max_capacity must be rejected");
+        assert_eq!(zero_cap.kind(), ErrorKind::Configuration);
+
+        let zero_ttl =
+            InMemoryDedupStore::with_limits(10, 0).expect_err("zero ttl_secs must be rejected");
+        assert_eq!(zero_ttl.kind(), ErrorKind::Configuration);
     }
 
     #[tokio::test]
