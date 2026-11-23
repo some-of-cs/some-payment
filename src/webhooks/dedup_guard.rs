@@ -399,8 +399,8 @@ mod tests {
 
     #[test]
     fn with_limits_rejects_zero_capacity_and_zero_ttl() {
-        let zero_cap = InMemoryDedupStore::with_limits(0, 60)
-            .expect_err("zero max_capacity must be rejected");
+        let zero_cap =
+            InMemoryDedupStore::with_limits(0, 60).expect_err("zero max_capacity must be rejected");
         assert_eq!(zero_cap.kind(), ErrorKind::Configuration);
 
         let zero_ttl =
