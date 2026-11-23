@@ -198,18 +198,7 @@ impl PaymentOrchestrator {
         &self,
         req: &CreatePaymentRequest,
     ) -> Result<PaymentResult, PaymentError> {
-        req.validate()?;
-        let (provider, ctx) = self.prepare_routed(RoutedPrep {
-            op: PaymentOperation::CreatePayment,
-            money: &req.money,
-            order_id: &req.order_id,
-            resolution: ResolutionInput {
-                explicit: req.provider_id.as_ref(),
-                currency: Some(req.money.currency()),
-                country: req.buyer_country.as_deref(),
-                required: required_create_payment_caps(req),
-            },
-        })?;
+        let (provider, ctx) = self.prepare_routed(req)?;
         self.execute_payment_op(ctx, || provider.create_payment(req))
             .await
     }
@@ -230,18 +219,7 @@ impl PaymentOrchestrator {
         &self,
         req: &CheckoutSessionRequest,
     ) -> Result<PaymentResult, PaymentError> {
-        req.validate()?;
-        let (provider, ctx) = self.prepare_routed(RoutedPrep {
-            op: PaymentOperation::CreateCheckout,
-            money: &req.money,
-            order_id: &req.order_id,
-            resolution: ResolutionInput {
-                explicit: req.provider_id.as_ref(),
-                currency: Some(req.money.currency()),
-                country: None,
-                required: required_checkout_caps(req),
-            },
-        })?;
+        let (provider, ctx) = self.prepare_routed(req)?;
         self.execute_payment_op(ctx, || provider.create_checkout(req))
             .await
     }
@@ -280,13 +258,7 @@ impl PaymentOrchestrator {
     /// the referenced provider is not registered or lacks required capabilities,
     /// a `before` hook aborts execution, or the provider returns an error.
     pub async fn capture(&self, req: &CaptureRequest) -> Result<PaymentResult, PaymentError> {
-        req.validate()?;
-        let (provider, ctx) = self.prepare_referenced(ReferencePrep {
-            op: PaymentOperation::Capture,
-            reference: &req.reference,
-            amount: req.amount.as_ref(),
-            required: required_capture_caps(req),
-        })?;
+        let (provider, ctx) = self.prepare_referenced(req)?;
         self.execute_payment_op(ctx, || provider.capture(req)).await
     }
 
@@ -300,13 +272,7 @@ impl PaymentOrchestrator {
     /// is not registered or lacks [`PaymentCapabilities::VOID_AUTHORIZED`],
     /// a `before` hook aborts execution, or the provider returns an error.
     pub async fn void_payment(&self, req: &VoidRequest) -> Result<PaymentResult, PaymentError> {
-        req.validate()?;
-        let (provider, ctx) = self.prepare_referenced(ReferencePrep {
-            op: PaymentOperation::VoidPayment,
-            reference: &req.reference,
-            amount: None,
-            required: PaymentCapabilities::VOID_AUTHORIZED,
-        })?;
+        let (provider, ctx) = self.prepare_referenced(req)?;
         self.execute_payment_op(ctx, || provider.void_payment(req))
             .await
     }
@@ -322,22 +288,18 @@ impl PaymentOrchestrator {
     /// the referenced provider is not registered or lacks required capabilities,
     /// a `before` hook aborts execution, or the provider returns an error.
     pub async fn refund(&self, req: &RefundRequest) -> Result<RefundResult, PaymentError> {
-        req.validate()?;
-        let (provider, ctx) = self.prepare_referenced(ReferencePrep {
-            op: PaymentOperation::Refund,
-            reference: &req.reference,
-            amount: req.amount.as_ref(),
-            required: required_refund_caps(req),
-        })?;
+        let (provider, ctx) = self.prepare_referenced(req)?;
         let (ctx, result) = self.execute_op(ctx, || provider.refund(req)).await?;
         self.hooks.run_after_refund(&ctx, &result).await;
         Ok(result)
     }
 
-    fn prepare_routed(
+    fn prepare_routed<R: RoutedRequest>(
         &self,
-        prep: RoutedPrep<'_>,
+        req: &R,
     ) -> Result<(Arc<dyn PaymentProvider>, HookContext), PaymentError> {
+        req.validate_request()?;
+        let prep = req.to_routed_prep();
         assert_positive_amount(prep.money)?;
         let required = prep.resolution.required;
         let provider = self.resolve_for_request(prep.resolution)?;
@@ -348,10 +310,12 @@ impl PaymentOrchestrator {
         Ok((provider, ctx))
     }
 
-    fn prepare_referenced(
+    fn prepare_referenced<R: ReferencedRequest>(
         &self,
-        prep: ReferencePrep<'_>,
+        req: &R,
     ) -> Result<(Arc<dyn PaymentProvider>, HookContext), PaymentError> {
+        req.validate_request()?;
+        let prep = req.to_reference_prep();
         assert_optional_positive_amount(prep.amount)?;
         let provider = self.registry.require(prep.reference.provider_id())?;
         assert_capability(provider.as_ref(), prep.required, prep.op.as_str())?;
@@ -436,6 +400,101 @@ struct ReferencePrep<'a> {
     reference: &'a ProviderReference,
     amount: Option<&'a Money>,
     required: PaymentCapabilities,
+}
+
+trait RoutedRequest {
+    fn validate_request(&self) -> Result<(), PaymentError>;
+    fn to_routed_prep(&self) -> RoutedPrep<'_>;
+}
+
+trait ReferencedRequest {
+    fn validate_request(&self) -> Result<(), PaymentError>;
+    fn to_reference_prep(&self) -> ReferencePrep<'_>;
+}
+
+impl RoutedRequest for CreatePaymentRequest {
+    fn validate_request(&self) -> Result<(), PaymentError> {
+        self.validate()
+    }
+
+    fn to_routed_prep(&self) -> RoutedPrep<'_> {
+        RoutedPrep {
+            op: PaymentOperation::CreatePayment,
+            money: &self.money,
+            order_id: &self.order_id,
+            resolution: ResolutionInput {
+                explicit: self.provider_id.as_ref(),
+                currency: Some(self.money.currency()),
+                country: self.buyer_country.as_deref(),
+                required: required_create_payment_caps(self),
+            },
+        }
+    }
+}
+
+impl RoutedRequest for CheckoutSessionRequest {
+    fn validate_request(&self) -> Result<(), PaymentError> {
+        self.validate()
+    }
+
+    fn to_routed_prep(&self) -> RoutedPrep<'_> {
+        RoutedPrep {
+            op: PaymentOperation::CreateCheckout,
+            money: &self.money,
+            order_id: &self.order_id,
+            resolution: ResolutionInput {
+                explicit: self.provider_id.as_ref(),
+                currency: Some(self.money.currency()),
+                country: None,
+                required: required_checkout_caps(self),
+            },
+        }
+    }
+}
+
+impl ReferencedRequest for CaptureRequest {
+    fn validate_request(&self) -> Result<(), PaymentError> {
+        self.validate()
+    }
+
+    fn to_reference_prep(&self) -> ReferencePrep<'_> {
+        ReferencePrep {
+            op: PaymentOperation::Capture,
+            reference: &self.reference,
+            amount: self.amount.as_ref(),
+            required: required_capture_caps(self),
+        }
+    }
+}
+
+impl ReferencedRequest for VoidRequest {
+    fn validate_request(&self) -> Result<(), PaymentError> {
+        self.validate()
+    }
+
+    fn to_reference_prep(&self) -> ReferencePrep<'_> {
+        ReferencePrep {
+            op: PaymentOperation::VoidPayment,
+            reference: &self.reference,
+            amount: None,
+            required: PaymentCapabilities::VOID_AUTHORIZED,
+        }
+    }
+}
+
+impl ReferencedRequest for RefundRequest {
+    fn validate_request(&self) -> Result<(), PaymentError> {
+        self.validate()
+    }
+
+    fn to_reference_prep(&self) -> ReferencePrep<'_> {
+        ReferencePrep {
+            op: PaymentOperation::Refund,
+            reference: &self.reference,
+            amount: self.amount.as_ref(),
+            required: required_refund_caps(self),
+        }
+    }
 }
 
 fn assert_positive_amount(money: &Money) -> Result<(), PaymentError> {
