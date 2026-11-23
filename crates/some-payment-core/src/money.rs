@@ -1,6 +1,7 @@
 //! Integer minor-unit [`Money`] and ISO-4217 [`CurrencyCode`] primitives.
 
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -9,7 +10,7 @@ use crate::error::PaymentError;
 /// Minor-unit decimal scale of an ISO-4217 currency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MinorUnitScale {
-    /// Zero-decimal currencies (e.g., `JPY`, `KRW`, `VND`).
+    /// Zero-decimal currencies (e.g., `ISK`, `JPY`, `KRW`, `VND`).
     Zero,
     /// Standard two-decimal currencies (e.g., `USD`, `EUR`, `SAR`, `EGP`).
     Two,
@@ -18,8 +19,8 @@ pub enum MinorUnitScale {
 }
 
 const ZERO_DECIMAL_CURRENCIES: &[&str] = &[
-    "BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF", "UGX", "VND", "VUV",
-    "XAF", "XOF", "XPF",
+    "BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF", "UGX", "VND",
+    "VUV", "XAF", "XOF", "XPF",
 ];
 
 const THREE_DECIMAL_CURRENCIES: &[&str] = &["BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"];
@@ -35,12 +36,26 @@ const THREE_DECIMAL_CURRENCIES: &[&str] = &["BHD", "IQD", "JOD", "KWD", "LYD", "
 /// assert_eq!(sar.as_str(), "SAR");
 /// assert_eq!(sar.scale(), MinorUnitScale::Two);
 /// ```
+///
+/// Direct tuple-struct construction is disallowed so unvalidated codes cannot
+/// be created:
+///
+/// ```compile_fail
+/// use some_payment_core::CurrencyCode;
+///
+/// let _ = CurrencyCode("USD".into());
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct CurrencyCode(String);
 
 impl CurrencyCode {
     /// Validates and normalizes a 3-letter ASCII ISO-4217 currency code.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ValidationError`] if `code` is not exactly 3
+    /// ASCII alphabetic letters after trimming.
     pub fn try_new(code: impl AsRef<str>) -> Result<Self, PaymentError> {
         let normalized = code.as_ref().trim().to_ascii_uppercase();
         if normalized.len() != 3 || !normalized.bytes().all(|b| b.is_ascii_uppercase()) {
@@ -52,16 +67,19 @@ impl CurrencyCode {
     }
 
     /// Returns the uppercase ISO-4217 code (e.g., `"SAR"`).
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Returns the lowercase ISO-4217 code (e.g., `"sar"` for Stripe wire payloads).
+    #[must_use]
     pub fn to_lowercase(&self) -> String {
         self.0.to_ascii_lowercase()
     }
 
     /// Returns the standard ISO-4217 minor-unit decimal scale for this currency.
+    #[must_use]
     pub fn scale(&self) -> MinorUnitScale {
         if ZERO_DECIMAL_CURRENCIES.contains(&self.0.as_str()) {
             MinorUnitScale::Zero
@@ -76,6 +94,28 @@ impl CurrencyCode {
 impl fmt::Display for CurrencyCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for CurrencyCode {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for CurrencyCode {
+    type Error = PaymentError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl FromStr for CurrencyCode {
+    type Err = PaymentError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_new(s)
     }
 }
 
@@ -100,6 +140,18 @@ impl<'de> Deserialize<'de> for CurrencyCode {
 /// assert_eq!(price.amount(), 15_000);
 /// assert_eq!(price.currency().as_str(), "SAR");
 /// ```
+///
+/// Direct struct construction is disallowed so zero-amount values cannot
+/// bypass validation:
+///
+/// ```compile_fail
+/// use some_payment_core::{CurrencyCode, Money};
+///
+/// let _ = Money {
+///     amount: 0,
+///     currency: CurrencyCode::try_new("USD").unwrap(),
+/// };
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Money {
     amount: u64,
@@ -108,6 +160,11 @@ pub struct Money {
 
 impl Money {
     /// Constructs a validated positive minor-unit [`Money`] value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ValidationError`] if `amount == 0` or if
+    /// `currency` is not a valid 3-letter ASCII ISO-4217 code.
     pub fn new(amount: u64, currency: impl AsRef<str>) -> Result<Self, PaymentError> {
         if amount == 0 {
             return Err(PaymentError::validation(
@@ -118,17 +175,39 @@ impl Money {
         Ok(Self { amount, currency })
     }
 
+    /// Constructs a validated positive minor-unit [`Money`] value from an
+    /// already-validated [`CurrencyCode`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ValidationError`] if `amount == 0`.
+    pub fn from_currency(amount: u64, currency: CurrencyCode) -> Result<Self, PaymentError> {
+        if amount == 0 {
+            return Err(PaymentError::validation(
+                "monetary amount must be strictly greater than zero",
+            ));
+        }
+        Ok(Self { amount, currency })
+    }
+
     /// Returns the integer minor-unit amount.
-    pub fn amount(&self) -> u64 {
+    #[must_use]
+    pub const fn amount(&self) -> u64 {
         self.amount
     }
 
     /// Returns the validated ISO-4217 [`CurrencyCode`].
+    #[must_use]
     pub fn currency(&self) -> &CurrencyCode {
         &self.currency
     }
 
     /// Checked addition requiring identical currencies.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ValidationError`] if currencies differ or if
+    /// the sum overflows `u64`.
     pub fn checked_add(&self, rhs: &Self) -> Result<Self, PaymentError> {
         if self.currency != rhs.currency {
             return Err(PaymentError::validation(
@@ -146,6 +225,11 @@ impl Money {
     }
 
     /// Checked subtraction requiring identical currencies and a strictly positive remainder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ValidationError`] if currencies differ, if
+    /// `rhs.amount > self.amount`, or if the remainder is zero.
     pub fn checked_sub(&self, rhs: &Self) -> Result<Self, PaymentError> {
         if self.currency != rhs.currency {
             return Err(PaymentError::validation(
@@ -193,6 +277,7 @@ mod tests {
         let sar = Money::new(15_000, "sar").unwrap();
         assert_eq!(sar.amount(), 15_000);
         assert_eq!(sar.currency().as_str(), "SAR");
+        assert_eq!(sar.currency().as_ref(), "SAR");
         assert_eq!(sar.currency().to_lowercase(), "sar");
         assert_eq!(sar.currency().to_string(), "SAR");
         assert_eq!(sar.currency().scale(), MinorUnitScale::Two);
@@ -200,8 +285,19 @@ mod tests {
         let jpy = Money::new(500, "JPY").unwrap();
         assert_eq!(jpy.currency().scale(), MinorUnitScale::Zero);
 
+        let isk = Money::new(1_000, "isk").unwrap();
+        assert_eq!(isk.currency().scale(), MinorUnitScale::Zero);
+
         let kwd = Money::new(1_250, "kwd").unwrap();
         assert_eq!(kwd.currency().scale(), MinorUnitScale::Three);
+
+        let code = CurrencyCode::try_from("egp").unwrap();
+        let parsed: CurrencyCode = "egp".parse().unwrap();
+        assert_eq!(code, parsed);
+        let egp = Money::from_currency(2_500, code).unwrap();
+        assert_eq!(egp.amount(), 2_500);
+        assert_eq!(egp.currency().as_str(), "EGP");
+        assert!(Money::from_currency(0, parsed).is_err());
     }
 
     #[test]
@@ -238,7 +334,27 @@ mod tests {
     }
 
     #[test]
-    fn serde_rejects_zero_amount() {
+    fn serde_round_trips_and_rejects_zero_amount() {
+        let money = Money::new(15_000, "sar").unwrap();
+        let m_json = serde_json::to_string(&money).unwrap();
+        let m_back: Money = serde_json::from_str(&m_json).unwrap();
+        assert_eq!(m_back, money);
+
+        let code = CurrencyCode::try_new("kwd").unwrap();
+        let c_json = serde_json::to_string(&code).unwrap();
+        let c_back: CurrencyCode = serde_json::from_str(&c_json).unwrap();
+        assert_eq!(c_back, code);
+
+        for scale in [
+            MinorUnitScale::Zero,
+            MinorUnitScale::Two,
+            MinorUnitScale::Three,
+        ] {
+            let s_json = serde_json::to_string(&scale).unwrap();
+            let s_back: MinorUnitScale = serde_json::from_str(&s_json).unwrap();
+            assert_eq!(s_back, scale);
+        }
+
         let bad: Result<Money, _> = serde_json::from_str(r#"{"amount":0,"currency":"USD"}"#);
         assert!(bad.is_err());
     }

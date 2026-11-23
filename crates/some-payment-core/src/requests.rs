@@ -23,6 +23,14 @@ pub const MAX_SPLITS: usize = 50;
 pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
 /// Maximum merchant order identifier length in bytes.
 pub const MAX_ORDER_ID_LEN: usize = 255;
+/// Maximum recipient identifier length in bytes for split instructions.
+pub const MAX_RECIPIENT_ID_LEN: usize = 255;
+/// Maximum URL length in bytes accepted for callback and redirect URLs.
+pub const MAX_URL_LEN: usize = 2048;
+/// Maximum order description length in bytes.
+pub const MAX_DESCRIPTION_LEN: usize = 1000;
+/// Maximum cancellation or refund reason length in bytes.
+pub const MAX_REASON_LEN: usize = 500;
 
 /// Controls whether a payment captures immediately or places an authorization hold.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -48,8 +56,12 @@ pub struct SplitInstruction {
 
 /// Canonical request to create a direct payment or embedded payment intent.
 ///
-/// Implements custom [`fmt::Debug`] so `customer_email`, `customer_phone`, and
-/// `payment_token` are redacted as `"[REDACTED]"` when present.
+/// Implements custom [`fmt::Debug`] so `customer_email`, `customer_phone`,
+/// `payment_token`, and any query/fragment parameters on `callback_url` are
+/// redacted as `"[REDACTED]"` when present.
+///
+/// Callers MUST invoke [`Self::validate`] after deserializing untrusted
+/// request payloads before passing them to a [`crate::PaymentProvider`].
 ///
 /// # Examples
 ///
@@ -95,6 +107,19 @@ fn redacted_opt(value: &Option<String>) -> Option<&'static str> {
     value.as_ref().map(|_| "[REDACTED]")
 }
 
+/// Strips any `?query` or `#fragment` portion from a URL for safe `Debug` logging.
+pub(crate) fn redact_url_query(url: &str) -> String {
+    match url.find(['?', '#']) {
+        Some(idx) => format!("{}?[REDACTED]", &url[..idx]),
+        None => url.to_owned(),
+    }
+}
+
+/// Redacts query/fragment parameters on an optional URL for safe `Debug` logging.
+pub(crate) fn redact_opt_url(url: &Option<String>) -> Option<String> {
+    url.as_deref().map(redact_url_query)
+}
+
 impl fmt::Debug for CreatePaymentRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CreatePaymentRequest")
@@ -105,7 +130,7 @@ impl fmt::Debug for CreatePaymentRequest {
             .field("description", &self.description)
             .field("capture_mode", &self.capture_mode)
             .field("idempotency_key", &self.idempotency_key)
-            .field("callback_url", &self.callback_url)
+            .field("callback_url", &redact_opt_url(&self.callback_url))
             .field("customer_email", &redacted_opt(&self.customer_email))
             .field("customer_phone", &redacted_opt(&self.customer_phone))
             .field("payment_token", &redacted_opt(&self.payment_token))
@@ -125,6 +150,7 @@ impl Drop for CreatePaymentRequest {
 
 impl CreatePaymentRequest {
     /// Creates a new [`CreatePaymentRequest`] with [`CaptureMode::Automatic`].
+    #[must_use]
     pub fn new(money: Money, order_id: impl Into<String>) -> Self {
         Self {
             provider_id: None,
@@ -144,28 +170,43 @@ impl CreatePaymentRequest {
     }
 
     /// Sets the [`CaptureMode`].
+    #[must_use]
     pub fn with_capture_mode(mut self, mode: CaptureMode) -> Self {
         self.capture_mode = mode;
         self
     }
 
     /// Sets an explicit [`ProviderId`] override.
+    #[must_use]
     pub fn with_provider_id(mut self, provider_id: ProviderId) -> Self {
         self.provider_id = Some(provider_id);
         self
     }
 
     /// Sets the caller-supplied idempotency key.
+    #[must_use]
     pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
         self
     }
 
-    /// Validates cross-gateway request invariants (order ID, country, URLs,
-    /// idempotency key, metadata caps, and splits bounds).
+    /// Validates cross-gateway request invariants (order ID, country, description,
+    /// URLs, idempotency key, metadata caps, and splits bounds).
+    ///
+    /// Callers MUST call this method after deserializing a [`CreatePaymentRequest`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ValidationError`] if any field violates length,
+    /// character, URL scheme/host, metadata, or split-settlement invariants.
     pub fn validate(&self) -> Result<(), PaymentError> {
         validate_order_id(&self.order_id)?;
         validate_optional_country(self.buyer_country.as_deref())?;
+        validate_optional_bounded_text(
+            self.description.as_deref(),
+            MAX_DESCRIPTION_LEN,
+            "description",
+        )?;
         validate_optional_idempotency_key(self.idempotency_key.as_deref())?;
         validate_optional_http_url(self.callback_url.as_deref(), "callback_url")?;
         validate_metadata(&self.metadata)?;
@@ -175,8 +216,12 @@ impl CreatePaymentRequest {
 
 /// Canonical request to create a provider-hosted checkout page, session, or invoice.
 ///
-/// Implements custom [`fmt::Debug`] so `customer_email` and `customer_phone`
-/// are redacted as `"[REDACTED]"` when present.
+/// Implements custom [`fmt::Debug`] so `customer_email`, `customer_phone`, and
+/// any query/fragment parameters on `success_url` and `cancel_url` are redacted
+/// as `"[REDACTED]"` when present.
+///
+/// Callers MUST invoke [`Self::validate`] after deserializing untrusted
+/// request payloads before passing them to a [`crate::PaymentProvider`].
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckoutSessionRequest {
     /// Optional explicit provider override.
@@ -209,8 +254,8 @@ impl fmt::Debug for CheckoutSessionRequest {
             .field("provider_id", &self.provider_id)
             .field("money", &self.money)
             .field("order_id", &self.order_id)
-            .field("success_url", &self.success_url)
-            .field("cancel_url", &self.cancel_url)
+            .field("success_url", &redact_url_query(&self.success_url))
+            .field("cancel_url", &redact_opt_url(&self.cancel_url))
             .field("description", &self.description)
             .field("customer_email", &redacted_opt(&self.customer_email))
             .field("customer_phone", &redacted_opt(&self.customer_phone))
@@ -229,17 +274,111 @@ impl Drop for CheckoutSessionRequest {
 }
 
 impl CheckoutSessionRequest {
+    /// Creates a new [`CheckoutSessionRequest`] with [`CaptureMode::Automatic`].
+    #[must_use]
+    pub fn new(
+        money: Money,
+        order_id: impl Into<String>,
+        success_url: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider_id: None,
+            money,
+            order_id: order_id.into(),
+            success_url: success_url.into(),
+            cancel_url: None,
+            description: None,
+            customer_email: None,
+            customer_phone: None,
+            capture_mode: CaptureMode::Automatic,
+            idempotency_key: None,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    /// Sets an explicit [`ProviderId`] override.
+    #[must_use]
+    pub fn with_provider_id(mut self, provider_id: ProviderId) -> Self {
+        self.provider_id = Some(provider_id);
+        self
+    }
+
+    /// Sets the cancel redirect URL.
+    #[must_use]
+    pub fn with_cancel_url(mut self, cancel_url: impl Into<String>) -> Self {
+        self.cancel_url = Some(cancel_url.into());
+        self
+    }
+
+    /// Sets the order description shown on the hosted checkout page.
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Sets the customer email address.
+    #[must_use]
+    pub fn with_customer_email(mut self, email: impl Into<String>) -> Self {
+        self.customer_email = Some(email.into());
+        self
+    }
+
+    /// Sets the customer phone number.
+    #[must_use]
+    pub fn with_customer_phone(mut self, phone: impl Into<String>) -> Self {
+        self.customer_phone = Some(phone.into());
+        self
+    }
+
+    /// Sets the [`CaptureMode`].
+    #[must_use]
+    pub fn with_capture_mode(mut self, mode: CaptureMode) -> Self {
+        self.capture_mode = mode;
+        self
+    }
+
+    /// Sets the caller-supplied idempotency key.
+    #[must_use]
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
+    }
+
+    /// Sets the bounded metadata map.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
     /// Validates cross-gateway checkout session request invariants.
+    ///
+    /// Callers MUST call this method after deserializing a [`CheckoutSessionRequest`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ValidationError`] if `order_id`, `success_url`,
+    /// `cancel_url`, `description`, `idempotency_key`, or `metadata` violate
+    /// cross-gateway validation invariants.
     pub fn validate(&self) -> Result<(), PaymentError> {
         validate_order_id(&self.order_id)?;
         validate_http_url(&self.success_url, "success_url")?;
         validate_optional_http_url(self.cancel_url.as_deref(), "cancel_url")?;
+        validate_optional_bounded_text(
+            self.description.as_deref(),
+            MAX_DESCRIPTION_LEN,
+            "description",
+        )?;
         validate_optional_idempotency_key(self.idempotency_key.as_deref())?;
         validate_metadata(&self.metadata)
     }
 }
 
 /// Request to capture a previously authorized hold (full when `amount` is `None`).
+///
+/// Callers MUST invoke [`Self::validate`] after deserializing untrusted
+/// request payloads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureRequest {
     /// Gateway reference identifying the authorized payment/transaction.
@@ -251,13 +390,47 @@ pub struct CaptureRequest {
 }
 
 impl CaptureRequest {
+    /// Creates a new full-capture [`CaptureRequest`] for `reference`.
+    #[must_use]
+    pub fn new(reference: ProviderReference) -> Self {
+        Self {
+            reference,
+            amount: None,
+            idempotency_key: None,
+        }
+    }
+
+    /// Sets an explicit partial capture amount.
+    #[must_use]
+    pub fn with_amount(mut self, amount: Money) -> Self {
+        self.amount = Some(amount);
+        self
+    }
+
+    /// Sets the caller-supplied idempotency key.
+    #[must_use]
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
+    }
+
     /// Validates capture request invariants (idempotency key bounds).
+    ///
+    /// Callers MUST call this method after deserializing a [`CaptureRequest`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ValidationError`] if `idempotency_key` is
+    /// malformed or exceeds [`MAX_IDEMPOTENCY_KEY_LEN`] bytes.
     pub fn validate(&self) -> Result<(), PaymentError> {
         validate_optional_idempotency_key(self.idempotency_key.as_deref())
     }
 }
 
 /// Request to void/cancel an authorized hold or unsettled payment.
+///
+/// Callers MUST invoke [`Self::validate`] after deserializing untrusted
+/// request payloads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoidRequest {
     /// Gateway reference identifying the payment/transaction.
@@ -269,13 +442,49 @@ pub struct VoidRequest {
 }
 
 impl VoidRequest {
-    /// Validates void request invariants (idempotency key bounds).
+    /// Creates a new [`VoidRequest`] for `reference`.
+    #[must_use]
+    pub fn new(reference: ProviderReference) -> Self {
+        Self {
+            reference,
+            reason: None,
+            idempotency_key: None,
+        }
+    }
+
+    /// Sets an optional cancellation reason.
+    #[must_use]
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+
+    /// Sets the caller-supplied idempotency key.
+    #[must_use]
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
+    }
+
+    /// Validates void request invariants (reason and idempotency key bounds).
+    ///
+    /// Callers MUST call this method after deserializing a [`VoidRequest`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ValidationError`] if `reason` contains control
+    /// characters or exceeds [`MAX_REASON_LEN`] bytes, or if `idempotency_key`
+    /// is invalid.
     pub fn validate(&self) -> Result<(), PaymentError> {
+        validate_optional_bounded_text(self.reason.as_deref(), MAX_REASON_LEN, "reason")?;
         validate_optional_idempotency_key(self.idempotency_key.as_deref())
     }
 }
 
 /// Request to refund a settled payment (full when `amount` is `None`).
+///
+/// Callers MUST invoke [`Self::validate`] after deserializing untrusted
+/// request payloads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefundRequest {
     /// Gateway reference identifying the settled payment/transaction.
@@ -289,28 +498,99 @@ pub struct RefundRequest {
 }
 
 impl RefundRequest {
-    /// Validates refund request invariants (idempotency key bounds).
+    /// Creates a new full-refund [`RefundRequest`] for `reference`.
+    #[must_use]
+    pub fn new(reference: ProviderReference) -> Self {
+        Self {
+            reference,
+            amount: None,
+            reason: None,
+            idempotency_key: None,
+        }
+    }
+
+    /// Sets an explicit partial refund amount.
+    #[must_use]
+    pub fn with_amount(mut self, amount: Money) -> Self {
+        self.amount = Some(amount);
+        self
+    }
+
+    /// Sets an optional refund reason.
+    #[must_use]
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+
+    /// Sets the caller-supplied idempotency key.
+    #[must_use]
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
+    }
+
+    /// Validates refund request invariants (reason and idempotency key bounds).
+    ///
+    /// Callers MUST call this method after deserializing a [`RefundRequest`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ValidationError`] if `reason` contains control
+    /// characters or exceeds [`MAX_REASON_LEN`] bytes, or if `idempotency_key`
+    /// is invalid.
     pub fn validate(&self) -> Result<(), PaymentError> {
+        validate_optional_bounded_text(self.reason.as_deref(), MAX_REASON_LEN, "reason")?;
         validate_optional_idempotency_key(self.idempotency_key.as_deref())
     }
 }
 
+fn has_control_chars(value: &str) -> bool {
+    value.bytes().any(|b| b.is_ascii_control())
+}
+
+fn validate_optional_bounded_text(
+    value: Option<&str>,
+    max_len: usize,
+    field: &str,
+) -> Result<(), PaymentError> {
+    let Some(text) = value else {
+        return Ok(());
+    };
+    if text.len() > max_len || has_control_chars(text) {
+        return Err(PaymentError::validation(format!(
+            "{field} must be <= {max_len} bytes without control characters"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_order_id(order_id: &str) -> Result<(), PaymentError> {
-    if order_id.trim().is_empty() || order_id.len() > MAX_ORDER_ID_LEN {
+    if order_id.trim().is_empty()
+        || order_id.len() > MAX_ORDER_ID_LEN
+        || has_control_chars(order_id)
+    {
         return Err(PaymentError::validation(
-            "order_id must be 1..=255 non-whitespace bytes",
+            "order_id must be 1..=255 non-whitespace bytes without control characters",
         ));
     }
     Ok(())
+}
+
+fn is_valid_idempotency_key(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.len() <= MAX_IDEMPOTENCY_KEY_LEN
+        && raw == raw.trim()
+        && raw.bytes().all(|b| b.is_ascii_graphic())
 }
 
 fn validate_optional_idempotency_key(key: Option<&str>) -> Result<(), PaymentError> {
     let Some(raw) = key else {
         return Ok(());
     };
-    if raw.trim().is_empty() || raw.len() > MAX_IDEMPOTENCY_KEY_LEN {
+    if !is_valid_idempotency_key(raw) {
         return Err(PaymentError::validation(
-            "idempotency_key must be 1..=255 non-whitespace bytes",
+            "idempotency_key must be 1..=255 printable non-whitespace ASCII bytes",
         ));
     }
     Ok(())
@@ -335,7 +615,22 @@ fn is_printable_ascii_url(rest: &str) -> bool {
 }
 
 fn is_valid_port(port: &str) -> bool {
-    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
+    !port.is_empty()
+        && port.bytes().all(|b| b.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|p| p > 0)
+}
+
+fn is_valid_host_label(label: &str) -> bool {
+    !label.is_empty()
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+fn is_valid_host(host: &str) -> bool {
+    !host.is_empty() && host.split('.').all(is_valid_host_label)
 }
 
 fn is_valid_ipv6_authority(authority: &str) -> bool {
@@ -356,8 +651,8 @@ fn is_valid_host_port(authority: &str) -> bool {
         return false;
     }
     match authority.split_once(':') {
-        Some((host, port)) => !host.is_empty() && is_valid_port(port),
-        None => !authority.is_empty(),
+        Some((host, port)) => is_valid_host(host) && is_valid_port(port),
+        None => is_valid_host(authority),
     }
 }
 
@@ -371,18 +666,55 @@ fn is_valid_authority(authority: &str) -> bool {
     is_valid_host_port(authority)
 }
 
+fn extract_authority_host(authority: &str) -> Option<&str> {
+    if authority.starts_with('[') {
+        return authority
+            .split_once(']')
+            .map(|(host, _)| &authority[..=host.len()]);
+    }
+    Some(authority.split_once(':').map_or(authority, |(h, _)| h))
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]"
+}
+
+fn is_scheme_allowed(is_https: bool, authority: &str) -> bool {
+    is_https || extract_authority_host(authority).is_some_and(is_loopback_host)
+}
+
+fn parse_url_scheme(url: &str) -> Option<(bool, &str)> {
+    if let Some(rest) = url.strip_prefix("https://") {
+        return Some((true, rest));
+    }
+    url.strip_prefix("http://").map(|rest| (false, rest))
+}
+
 fn has_valid_host_and_chars(rest: &str) -> bool {
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     is_printable_ascii_url(rest) && is_valid_authority(authority)
 }
 
 fn validate_http_url(url: &str, field: &str) -> Result<(), PaymentError> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"));
-    if !rest.is_some_and(has_valid_host_and_chars) {
+    if url.len() > MAX_URL_LEN {
         return Err(PaymentError::validation(format!(
-            "{field} must be a valid http:// or https:// URL"
+            "{field} exceeds maximum length of {MAX_URL_LEN} bytes"
+        )));
+    }
+    let Some((is_https, rest)) = parse_url_scheme(url) else {
+        return Err(PaymentError::validation(format!(
+            "{field} must use https:// (or http:// for loopback only)"
+        )));
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if !has_valid_host_and_chars(rest) {
+        return Err(PaymentError::validation(format!(
+            "{field} must be a valid URL"
+        )));
+    }
+    if !is_scheme_allowed(is_https, authority) {
+        return Err(PaymentError::validation(format!(
+            "{field} must use https:// for non-loopback hosts"
         )));
     }
     Ok(())
@@ -421,9 +753,14 @@ fn validate_metadata(metadata: &BTreeMap<String, String>) -> Result<(), PaymentE
 }
 
 fn validate_split_item(split: &SplitInstruction) -> Result<u64, PaymentError> {
-    if split.amount == 0 || split.recipient_id.trim().is_empty() {
+    let recipient = split.recipient_id.as_str();
+    if split.amount == 0
+        || recipient.trim().is_empty()
+        || recipient.len() > MAX_RECIPIENT_ID_LEN
+        || has_control_chars(recipient)
+    {
         return Err(PaymentError::validation(
-            "split instructions require non-empty recipient_id and amount > 0",
+            "split instructions require amount > 0 and recipient_id of 1..=255 bytes without control characters",
         ));
     }
     Ok(split.amount)
@@ -465,7 +802,7 @@ mod tests {
     fn builder_helpers_and_capture_mode() {
         assert_eq!(CaptureMode::default(), CaptureMode::Automatic);
         let money = Money::new(5_000, "SAR").unwrap();
-        let req = CreatePaymentRequest::new(money, "ORD-1")
+        let req = CreatePaymentRequest::new(money.clone(), "ORD-1")
             .with_capture_mode(CaptureMode::Manual)
             .with_provider_id(ProviderId::new("moyasar"))
             .with_idempotency_key("idem-key-1");
@@ -473,39 +810,73 @@ mod tests {
         assert_eq!(req.provider_id, Some(ProviderId::new("moyasar")));
         assert_eq!(req.idempotency_key.as_deref(), Some("idem-key-1"));
         assert!(req.validate().is_ok());
+
+        let mut meta = BTreeMap::new();
+        meta.insert("env".into(), "test".into());
+        let checkout = CheckoutSessionRequest::new(
+            money.clone(),
+            "ORD-CHK-1",
+            "https://example.com/ok",
+        )
+        .with_provider_id(ProviderId::new("stripe"))
+        .with_cancel_url("https://example.com/cancel")
+        .with_description("Order 1")
+        .with_customer_email("buyer@example.com")
+        .with_customer_phone("+966501234567")
+        .with_capture_mode(CaptureMode::Manual)
+        .with_idempotency_key("chk-idem-1")
+        .with_metadata(meta);
+        assert!(checkout.validate().is_ok());
+        assert_eq!(checkout.capture_mode, CaptureMode::Manual);
+
+        let cap = CaptureRequest::new(sample_reference())
+            .with_amount(money.clone())
+            .with_idempotency_key("cap-1");
+        assert!(cap.validate().is_ok());
+
+        let void = VoidRequest::new(sample_reference())
+            .with_reason("customer_canceled")
+            .with_idempotency_key("void-1");
+        assert!(void.validate().is_ok());
+
+        let refund = RefundRequest::new(sample_reference())
+            .with_amount(money)
+            .with_reason("duplicate")
+            .with_idempotency_key("ref-1");
+        assert!(refund.validate().is_ok());
     }
 
     #[test]
-    fn debug_redacts_pii_and_tokens() {
+    fn debug_redacts_pii_tokens_and_url_queries() {
         let money = Money::new(5_000, "SAR").unwrap();
         let mut req = CreatePaymentRequest::new(money.clone(), "ORD-PII");
         req.customer_email = Some("buyer@canary-domain.test".into());
         req.customer_phone = Some("+201001234567".into());
         req.payment_token = Some("tok_CANARY_999".into());
+        req.callback_url = Some("https://example.com/cb?token=CB_QUERY_CANARY#frag".into());
 
         let dbg = format!("{req:?}");
         assert!(!dbg.contains("buyer@canary-domain.test"));
         assert!(!dbg.contains("+201001234567"));
         assert!(!dbg.contains("tok_CANARY_999"));
-        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("CB_QUERY_CANARY"));
+        assert!(dbg.contains("https://example.com/cb?[REDACTED]"));
 
-        let checkout = CheckoutSessionRequest {
-            provider_id: None,
+        let checkout = CheckoutSessionRequest::new(
             money,
-            order_id: "ORD-CHK".into(),
-            success_url: "https://example.com/ok".into(),
-            cancel_url: None,
-            description: None,
-            customer_email: Some("checkout@canary-domain.test".into()),
-            customer_phone: Some("+966501234567".into()),
-            capture_mode: CaptureMode::Automatic,
-            idempotency_key: None,
-            metadata: BTreeMap::new(),
-        };
+            "ORD-CHK",
+            "https://example.com/ok?session=OK_CANARY_1",
+        )
+        .with_cancel_url("https://example.com/cancel#CANCEL_CANARY_2")
+        .with_customer_email("checkout@canary-domain.test")
+        .with_customer_phone("+966501234567");
         let chk_dbg = format!("{checkout:?}");
         assert!(!chk_dbg.contains("checkout@canary-domain.test"));
         assert!(!chk_dbg.contains("+966501234567"));
-        assert!(chk_dbg.contains("[REDACTED]"));
+        assert!(!chk_dbg.contains("OK_CANARY_1"));
+        assert!(!chk_dbg.contains("CANCEL_CANARY_2"));
+        assert!(chk_dbg.contains("https://example.com/ok?[REDACTED]"));
+        assert!(chk_dbg.contains("https://example.com/cancel?[REDACTED]"));
     }
 
     #[test]
@@ -613,19 +984,13 @@ mod tests {
     #[test]
     fn validates_checkout_capture_void_and_refund_requests() {
         let money = Money::new(2_500, "USD").unwrap();
-        let mut checkout = CheckoutSessionRequest {
-            provider_id: None,
-            money: money.clone(),
-            order_id: "ORD-CHK".into(),
-            success_url: "https://example.com/success".into(),
-            cancel_url: Some("http://localhost:3000/cancel".into()),
-            description: None,
-            customer_email: None,
-            customer_phone: None,
-            capture_mode: CaptureMode::Automatic,
-            idempotency_key: Some("idem-1".into()),
-            metadata: BTreeMap::new(),
-        };
+        let mut checkout = CheckoutSessionRequest::new(
+            money.clone(),
+            "ORD-CHK",
+            "https://example.com/success",
+        )
+        .with_cancel_url("http://localhost:3000/cancel")
+        .with_idempotency_key("idem-1");
         assert!(checkout.validate().is_ok());
 
         checkout.success_url = "javascript:alert(1)".into();
@@ -634,54 +999,70 @@ mod tests {
         checkout.cancel_url = Some("   ".into());
         assert!(checkout.validate().is_err());
 
-        let cap_ok = CaptureRequest {
-            reference: sample_reference(),
-            amount: Some(money.clone()),
-            idempotency_key: Some("cap-key".into()),
-        };
+        let cap_ok = CaptureRequest::new(sample_reference())
+            .with_amount(money.clone())
+            .with_idempotency_key("cap-key");
         assert!(cap_ok.validate().is_ok());
 
-        let cap_bad = CaptureRequest {
-            reference: sample_reference(),
-            amount: None,
-            idempotency_key: Some("   ".into()),
-        };
+        let cap_bad = CaptureRequest::new(sample_reference()).with_idempotency_key("   ");
         assert!(cap_bad.validate().is_err());
 
-        let void_bad = VoidRequest {
-            reference: sample_reference(),
-            reason: None,
-            idempotency_key: Some("k".repeat(256)),
-        };
+        let void_bad = VoidRequest::new(sample_reference()).with_idempotency_key("k".repeat(256));
         assert!(void_bad.validate().is_err());
 
-        let refund_ok = RefundRequest {
-            reference: sample_reference(),
-            amount: Some(money),
-            reason: Some("requested".into()),
-            idempotency_key: None,
-        };
+        let refund_ok = RefundRequest::new(sample_reference())
+            .with_amount(money)
+            .with_reason("requested");
         assert!(refund_ok.validate().is_ok());
     }
 
     #[test]
-    fn rejects_padded_order_id_idempotency_key_and_country() {
+    fn rejects_invalid_idempotency_keys_control_chars_and_text_caps() {
         let money = Money::new(1_000, "SAR").unwrap();
-        let padded_order = format!("{}O", " ".repeat(256));
-        let padded_order_req = CreatePaymentRequest::new(money.clone(), padded_order);
-        assert!(padded_order_req.validate().is_err());
 
-        let key = format!("{}K", " ".repeat(256));
-        let req = CreatePaymentRequest::new(money.clone(), "ORD-1").with_idempotency_key(&key);
-        assert!(req.validate().is_err());
+        for bad_key in [
+            " leading",
+            "trailing ",
+            "has space",
+            "line\nbreak",
+            "cr\rkey",
+            "null\0key",
+            "non-ascii-\u{00E9}",
+            &format!("{}K", " ".repeat(256)),
+        ] {
+            let req = CreatePaymentRequest::new(money.clone(), "ORD-1")
+                .with_idempotency_key(bad_key);
+            assert!(req.validate().is_err(), "expected error for key {bad_key:?}");
+        }
 
-        let refund_req = RefundRequest {
-            reference: sample_reference(),
-            amount: Some(money.clone()),
-            reason: None,
-            idempotency_key: Some(key),
-        };
-        assert!(refund_req.validate().is_err());
+        for bad_order in ["ORD\r1", "ORD\n1", "ORD\01", &format!("{}O", " ".repeat(256))] {
+            let req = CreatePaymentRequest::new(money.clone(), bad_order);
+            assert!(req.validate().is_err(), "expected error for order {bad_order:?}");
+        }
+
+        let mut split_req = CreatePaymentRequest::new(money.clone(), "ORD-S");
+        split_req.splits.push(SplitInstruction {
+            recipient_id: "r".repeat(MAX_RECIPIENT_ID_LEN + 1),
+            amount: 100,
+            fee_source: false,
+        });
+        assert!(split_req.validate().is_err());
+
+        split_req.splits[0].recipient_id = "acct\n1".into();
+        assert!(split_req.validate().is_err());
+
+        let mut desc_req = CreatePaymentRequest::new(money.clone(), "ORD-D");
+        desc_req.description = Some("d".repeat(MAX_DESCRIPTION_LEN + 1));
+        assert!(desc_req.validate().is_err());
+        desc_req.description = Some("bad\0desc".into());
+        assert!(desc_req.validate().is_err());
+
+        let void_long = VoidRequest::new(sample_reference())
+            .with_reason("r".repeat(MAX_REASON_LEN + 1));
+        assert!(void_long.validate().is_err());
+
+        let refund_ctrl = RefundRequest::new(sample_reference()).with_reason("bad\r\nreason");
+        assert!(refund_ctrl.validate().is_err());
 
         let mut country_req = CreatePaymentRequest::new(money, "ORD-2");
         country_req.buyer_country = Some(" SA ".into());
@@ -689,26 +1070,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_hostless_whitespace_and_control_char_urls() {
+    fn enforces_strict_url_length_port_host_and_https_rules() {
         let money = Money::new(1_000, "USD").unwrap();
+        let oversized_url = format!("https://example.com/{}", "a".repeat(MAX_URL_LEN));
         let bad_urls = [
+            oversized_url.as_str(),
             "https://?next=done",
             "https:///path",
             "https://#frag",
             "https://example.com/a b",
             "https://example.com/a\nb",
-        ];
-        for url in bad_urls {
-            let mut req = CreatePaymentRequest::new(money.clone(), "ORD-URL");
-            req.callback_url = Some(url.into());
-            assert!(req.validate().is_err(), "expected error for {url}");
-        }
-    }
-
-    #[test]
-    fn rejects_userinfo_backslash_empty_host_port_and_non_ascii_urls() {
-        let money = Money::new(1_000, "USD").unwrap();
-        let bad_urls = [
             "https://user:pass@example.com/cb",
             "https://@evil.com",
             "https://:443",
@@ -716,9 +1087,18 @@ mod tests {
             "https://evil.com\\@trusted.com",
             "https://example.com/\u{202E}cb",
             "https://[not-an-ip]/cb",
+            "https://example.com:0/cb",
+            "https://[::1]:0/cb",
+            "https://-bad.example.com/cb",
+            "https://bad-.example.com/cb",
+            "https://a..b.com/cb",
+            "https://bad_host.com/cb",
+            "http://example.com/cb",
+            "http://10.0.0.1/cb",
+            "http://[2001:db8::1]/cb",
         ];
         for url in bad_urls {
-            let mut req = CreatePaymentRequest::new(money.clone(), "ORD-URL-ADV");
+            let mut req = CreatePaymentRequest::new(money.clone(), "ORD-URL");
             req.callback_url = Some(url.into());
             assert!(req.validate().is_err(), "expected error for {url}");
         }
@@ -727,11 +1107,74 @@ mod tests {
             "https://[::1]:8443/cb",
             "https://[::1]/cb",
             "https://example.com:8443/cb",
+            "http://localhost:3000/cb",
+            "http://LOCALHOST/cb",
+            "http://127.0.0.1:8080/cb",
+            "http://[::1]:8080/cb",
         ];
         for url in good_urls {
             let mut req = CreatePaymentRequest::new(money.clone(), "ORD-URL-OK");
             req.callback_url = Some(url.into());
             assert!(req.validate().is_ok(), "expected ok for {url}");
         }
+    }
+
+    #[test]
+    fn exhaustive_request_dtos_serde_round_trip() {
+        let money = Money::new(9_900, "SAR").unwrap();
+        let mut create = CreatePaymentRequest::new(money.clone(), "ORD-SERDE-1")
+            .with_provider_id(ProviderId::new("moyasar"))
+            .with_capture_mode(CaptureMode::Manual)
+            .with_idempotency_key("idem-serde-1");
+        create.buyer_country = Some("SA".into());
+        create.description = Some("Order desc".into());
+        create.callback_url = Some("https://example.com/cb".into());
+        create.customer_email = Some("buyer@example.com".into());
+        create.customer_phone = Some("+966501234567".into());
+        create.payment_token = Some("tok_1".into());
+        create.splits.push(SplitInstruction {
+            recipient_id: "acct_1".into(),
+            amount: 5_000,
+            fee_source: true,
+        });
+        create.metadata.insert("k".into(), "v".into());
+
+        let c_json = serde_json::to_string(&create).unwrap();
+        let c_back: CreatePaymentRequest = serde_json::from_str(&c_json).unwrap();
+        assert_eq!(c_back, create);
+
+        let checkout = CheckoutSessionRequest::new(
+            money.clone(),
+            "ORD-SERDE-2",
+            "https://example.com/ok",
+        )
+        .with_cancel_url("https://example.com/cancel")
+        .with_description("Hosted checkout")
+        .with_idempotency_key("idem-serde-2");
+        let chk_json = serde_json::to_string(&checkout).unwrap();
+        let chk_back: CheckoutSessionRequest = serde_json::from_str(&chk_json).unwrap();
+        assert_eq!(chk_back, checkout);
+
+        let capture = CaptureRequest::new(sample_reference())
+            .with_amount(money.clone())
+            .with_idempotency_key("idem-cap");
+        let cap_json = serde_json::to_string(&capture).unwrap();
+        let cap_back: CaptureRequest = serde_json::from_str(&cap_json).unwrap();
+        assert_eq!(cap_back, capture);
+
+        let void = VoidRequest::new(sample_reference())
+            .with_reason("expired")
+            .with_idempotency_key("idem-void");
+        let v_json = serde_json::to_string(&void).unwrap();
+        let v_back: VoidRequest = serde_json::from_str(&v_json).unwrap();
+        assert_eq!(v_back, void);
+
+        let refund = RefundRequest::new(sample_reference())
+            .with_amount(money)
+            .with_reason("customer_request")
+            .with_idempotency_key("idem-refund");
+        let r_json = serde_json::to_string(&refund).unwrap();
+        let r_back: RefundRequest = serde_json::from_str(&r_json).unwrap();
+        assert_eq!(r_back, refund);
     }
 }

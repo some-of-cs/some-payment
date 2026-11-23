@@ -27,7 +27,23 @@ pub const MAX_REFERENCE_ID_LEN: usize = 255;
 ///     .unwrap();
 /// assert_eq!(reference.transaction_id(), Some("987654321"));
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+///
+/// Direct struct construction is disallowed; always use
+/// [`ProviderReference::builder`]:
+///
+/// ```compile_fail
+/// use some_payment_core::{ProviderId, ProviderReference};
+///
+/// let _ = ProviderReference {
+///     provider_id: ProviderId::new("stripe"),
+///     payment_id: Some("pi_1".into()),
+///     transaction_id: None,
+///     order_id: None,
+///     intent_id: None,
+///     checkout_session_id: None,
+/// };
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct ProviderReference {
     provider_id: ProviderId,
     payment_id: Option<String>,
@@ -39,6 +55,7 @@ pub struct ProviderReference {
 
 impl ProviderReference {
     /// Starts a [`ProviderReferenceBuilder`] for the given [`ProviderId`].
+    #[must_use]
     pub fn builder(provider_id: ProviderId) -> ProviderReferenceBuilder {
         ProviderReferenceBuilder {
             provider_id,
@@ -51,31 +68,37 @@ impl ProviderReference {
     }
 
     /// Target provider slug.
+    #[must_use]
     pub fn provider_id(&self) -> &ProviderId {
         &self.provider_id
     }
 
     /// Primary payment identifier (e.g., Moyasar UUID or Stripe `pi_...`).
+    #[must_use]
     pub fn payment_id(&self) -> Option<&str> {
         self.payment_id.as_deref()
     }
 
     /// Gateway transaction identifier (e.g., Paymob numeric `obj.id`).
+    #[must_use]
     pub fn transaction_id(&self) -> Option<&str> {
         self.transaction_id.as_deref()
     }
 
     /// Merchant or gateway order identifier (e.g., Paymob `special_reference`).
+    #[must_use]
     pub fn order_id(&self) -> Option<&str> {
         self.order_id.as_deref()
     }
 
     /// Payment intent identifier (Stripe `pi_...`, Moyasar intent, Paymob intention ID).
+    #[must_use]
     pub fn intent_id(&self) -> Option<&str> {
         self.intent_id.as_deref()
     }
 
     /// Hosted checkout session or invoice identifier (Stripe `cs_...`, Moyasar invoice ID).
+    #[must_use]
     pub fn checkout_session_id(&self) -> Option<&str> {
         self.checkout_session_id.as_deref()
     }
@@ -92,14 +115,27 @@ pub struct ProviderReferenceBuilder {
     checkout_session_id: Option<String>,
 }
 
+fn is_valid_ref_byte(b: u8) -> bool {
+    b.is_ascii_graphic() && !matches!(b, b'/' | b'\\' | b'?' | b'#' | b'%')
+}
+
+fn is_valid_ref_id(s: &str) -> bool {
+    !s.is_empty() && !s.contains("..") && s.bytes().all(is_valid_ref_byte)
+}
+
 fn normalize_ref_id(raw: Option<String>) -> Result<Option<String>, PaymentError> {
     let Some(value) = raw else {
         return Ok(None);
     };
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.len() > MAX_REFERENCE_ID_LEN {
+    if value.len() > MAX_REFERENCE_ID_LEN {
         return Err(PaymentError::validation(
-            "reference identifiers must be 1..=255 non-whitespace bytes",
+            "reference identifiers must not exceed 255 bytes",
+        ));
+    }
+    let trimmed = value.trim();
+    if !is_valid_ref_id(trimmed) {
+        return Err(PaymentError::validation(
+            "reference identifiers must be 1..=255 printable ASCII bytes without path or URL delimiters",
         ));
     }
     Ok(Some(trimmed.to_owned()))
@@ -107,30 +143,35 @@ fn normalize_ref_id(raw: Option<String>) -> Result<Option<String>, PaymentError>
 
 impl ProviderReferenceBuilder {
     /// Sets the primary payment ID.
+    #[must_use]
     pub fn payment_id(mut self, id: impl Into<String>) -> Self {
         self.payment_id = Some(id.into());
         self
     }
 
     /// Sets the gateway transaction ID.
+    #[must_use]
     pub fn transaction_id(mut self, id: impl Into<String>) -> Self {
         self.transaction_id = Some(id.into());
         self
     }
 
     /// Sets the merchant/gateway order ID.
+    #[must_use]
     pub fn order_id(mut self, id: impl Into<String>) -> Self {
         self.order_id = Some(id.into());
         self
     }
 
     /// Sets the payment intent ID.
+    #[must_use]
     pub fn intent_id(mut self, id: impl Into<String>) -> Self {
         self.intent_id = Some(id.into());
         self
     }
 
     /// Sets the hosted checkout session or invoice ID.
+    #[must_use]
     pub fn checkout_session_id(mut self, id: impl Into<String>) -> Self {
         self.checkout_session_id = Some(id.into());
         self
@@ -138,6 +179,14 @@ impl ProviderReferenceBuilder {
 
     /// Validates that at least one identifier is populated and within length bounds,
     /// storing normalized trimmed identifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ValidationError`] if no identifier is provided,
+    /// if any raw identifier exceeds [`MAX_REFERENCE_ID_LEN`] bytes before
+    /// trimming, or if any trimmed identifier is empty, contains `..`, or
+    /// contains non-graphic ASCII, whitespace, control, or URL/path delimiter
+    /// bytes (`/`, `\`, `?`, `#`, `%`).
     pub fn build(self) -> Result<ProviderReference, PaymentError> {
         let payment_id = normalize_ref_id(self.payment_id)?;
         let transaction_id = normalize_ref_id(self.transaction_id)?;
@@ -208,10 +257,12 @@ impl<'de> Deserialize<'de> for ProviderReference {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
-    fn round_trips_trims_and_exposes_all_accessors() {
+    fn round_trips_trims_hashes_and_exposes_all_accessors() {
         let reference = ProviderReference::builder(ProviderId::new("paymob"))
             .payment_id("  pay_1  ")
             .transaction_id("  456789  ")
@@ -227,13 +278,24 @@ mod tests {
         assert_eq!(reference.intent_id(), Some("pi_999"));
         assert_eq!(reference.checkout_session_id(), Some("cs_777"));
 
+        let mut set = HashSet::new();
+        assert!(set.insert(reference.clone()));
+        assert!(!set.insert(reference.clone()));
+
         let json = serde_json::to_string(&reference).unwrap();
         let decoded: ProviderReference = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, reference);
     }
 
     #[test]
-    fn rejects_empty_whitespace_and_oversized_ids() {
+    fn accepts_exact_255_byte_boundary_and_rejects_oversized_or_padded() {
+        let exact = "x".repeat(MAX_REFERENCE_ID_LEN);
+        let built = ProviderReference::builder(ProviderId::new("stripe"))
+            .payment_id(exact.clone())
+            .build()
+            .unwrap();
+        assert_eq!(built.payment_id(), Some(exact.as_str()));
+
         assert!(
             ProviderReference::builder(ProviderId::new("stripe"))
                 .build()
@@ -251,6 +313,41 @@ mod tests {
                 .build()
                 .is_err()
         );
+        let padded_oversized = format!("{}ok", " ".repeat(254));
+        assert_eq!(padded_oversized.len(), 256);
+        assert!(
+            ProviderReference::builder(ProviderId::new("stripe"))
+                .payment_id(padded_oversized)
+                .build()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_traversal_delimiters_and_control_chars() {
+        let bad_ids = [
+            "../admin",
+            "pay..123",
+            "pay/123",
+            "pay\\123",
+            "pay?foo=1",
+            "pay#frag",
+            "pay%2f123",
+            "pay\r123",
+            "pay\n123",
+            "pay\0123",
+            "pay 123",
+            "pay\u{202E}123",
+        ];
+        for bad in bad_ids {
+            assert!(
+                ProviderReference::builder(ProviderId::new("stripe"))
+                    .payment_id(bad)
+                    .build()
+                    .is_err(),
+                "expected error for {bad:?}"
+            );
+        }
     }
 
     #[test]
@@ -262,6 +359,10 @@ mod tests {
         let whitespace: Result<ProviderReference, _> =
             serde_json::from_str(r#"{"provider_id":"stripe","payment_id":"   "}"#);
         assert!(whitespace.is_err());
+
+        let traversal: Result<ProviderReference, _> =
+            serde_json::from_str(r#"{"provider_id":"stripe","payment_id":"../evil"}"#);
+        assert!(traversal.is_err());
 
         let oversized_json = format!(
             r#"{{"provider_id":"stripe","order_id":"{}"}}"#,

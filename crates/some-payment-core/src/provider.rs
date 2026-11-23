@@ -61,18 +61,36 @@ pub trait PaymentProvider: Send + Sync + fmt::Debug {
     fn capabilities(&self) -> PaymentCapabilities;
 
     /// Create a direct payment or an embedded payment intent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError`] if local validation fails, the provider does
+    /// not support direct payments or embedded intents, authentication fails,
+    /// the instrument is declined, or the upstream gateway is unavailable.
     async fn create_payment(
         &self,
         req: &CreatePaymentRequest,
     ) -> Result<PaymentResult, PaymentError>;
 
     /// Fetch authoritative payment state directly from the provider API.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError`] if the reference is missing a provider-required
+    /// identifier, authentication fails, or the upstream gateway rejects or
+    /// fails the inquiry.
     async fn get_payment(
         &self,
         reference: &ProviderReference,
     ) -> Result<PaymentResult, PaymentError>;
 
     /// Create a provider-hosted checkout page, session, or invoice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::Unsupported`] by default when the provider does
+    /// not implement hosted checkout, or another [`PaymentError`] on validation
+    /// or upstream gateway failure.
     async fn create_checkout(
         &self,
         _req: &CheckoutSessionRequest,
@@ -81,21 +99,45 @@ pub trait PaymentProvider: Send + Sync + fmt::Debug {
     }
 
     /// Capture an authorized hold (full when `amount` is `None`; partial when `Some`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::Unsupported`] by default when the provider does
+    /// not support capture, or another [`PaymentError`] on validation,
+    /// idempotency, or upstream gateway failure.
     async fn capture(&self, _req: &CaptureRequest) -> Result<PaymentResult, PaymentError> {
         Err(PaymentError::unsupported(self.id(), "capture"))
     }
 
     /// Release an authorization hold or void an unsettled payment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::Unsupported`] by default when the provider does
+    /// not support voiding, or another [`PaymentError`] on validation,
+    /// idempotency, or upstream gateway failure.
     async fn void_payment(&self, _req: &VoidRequest) -> Result<PaymentResult, PaymentError> {
         Err(PaymentError::unsupported(self.id(), "void_payment"))
     }
 
     /// Refund a settled payment (full when `amount` is `None`; partial when `Some`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::Unsupported`] by default when the provider does
+    /// not support refunds, or another [`PaymentError`] on validation,
+    /// idempotency, or upstream gateway failure.
     async fn refund(&self, _req: &RefundRequest) -> Result<RefundResult, PaymentError> {
         Err(PaymentError::unsupported(self.id(), "refund"))
     }
 
     /// Verify authenticity over raw bytes/query params, scrub secrets, and normalize event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::WebhookVerificationFailed`] if signature or
+    /// secret-token verification fails, or another [`PaymentError`] if the
+    /// payload cannot be parsed into a [`NormalizedWebhookEvent`].
     async fn parse_and_verify_webhook(
         &self,
         raw: &RawWebhookRequest,

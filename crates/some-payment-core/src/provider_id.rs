@@ -1,6 +1,7 @@
 //! Open, normalized lowercase provider identifier (`ProviderId`).
 
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -23,6 +24,15 @@ pub const MAX_PROVIDER_ID_LEN: usize = 64;
 /// let id = ProviderId::try_new("  Tap-Payments  ").unwrap();
 /// assert_eq!(id.as_str(), "tap-payments");
 /// ```
+///
+/// Direct tuple-struct construction is disallowed so unvalidated slugs cannot
+/// be constructed:
+///
+/// ```compile_fail
+/// use some_payment_core::ProviderId;
+///
+/// let _ = ProviderId("stripe".into());
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct ProviderId(String);
@@ -37,6 +47,7 @@ impl ProviderId {
     ///
     /// Panics if `id` is not a valid provider slug (must be 1..=64 ASCII
     /// characters starting with `[a-z0-9]` and containing only `[a-z0-9_-]`).
+    #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self::try_new(id.into()).expect("invalid static ProviderId slug")
     }
@@ -45,6 +56,12 @@ impl ProviderId {
     ///
     /// Valid slugs are 1..=64 ASCII characters starting with `[a-z0-9]` and
     /// containing only `[a-z0-9_-]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError::ValidationError`] if `id` is empty after
+    /// trimming, exceeds [`MAX_PROVIDER_ID_LEN`] bytes, does not start with an
+    /// ASCII letter or digit, or contains characters outside `[a-z0-9_-]`.
     pub fn try_new(id: impl AsRef<str>) -> Result<Self, PaymentError> {
         let normalized = id.as_ref().trim().to_ascii_lowercase();
         validate_slug(&normalized)?;
@@ -52,6 +69,7 @@ impl ProviderId {
     }
 
     /// Returns the normalized slug string slice.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -101,6 +119,22 @@ impl TryFrom<&str> for ProviderId {
     }
 }
 
+impl TryFrom<String> for ProviderId {
+    type Error = PaymentError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl FromStr for ProviderId {
+    type Err = PaymentError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_new(s)
+    }
+}
+
 impl<'de> Deserialize<'de> for ProviderId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -125,7 +159,13 @@ mod tests {
         assert_eq!(from_new.as_str(), "paymob");
         let from_try = ProviderId::try_from("moyasar").unwrap();
         assert_eq!(from_try.as_str(), "moyasar");
+        let from_string = ProviderId::try_from(String::from("  Stripe-V2 ")).unwrap();
+        assert_eq!(from_string.as_str(), "stripe-v2");
+        let parsed: ProviderId = "Tap_SA".parse().unwrap();
+        assert_eq!(parsed.as_str(), "tap_sa");
         assert!(ProviderId::try_from("../bad").is_err());
+        assert!(ProviderId::try_from(String::from("../bad")).is_err());
+        assert!("../bad".parse::<ProviderId>().is_err());
 
         let exact_max = "a".repeat(MAX_PROVIDER_ID_LEN);
         assert_eq!(ProviderId::try_new(&exact_max).unwrap().as_str(), exact_max);
