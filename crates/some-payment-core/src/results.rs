@@ -430,7 +430,9 @@ mod tests {
             captured_amount: None,
             refunded_amount: None,
             next_action: None,
-            checkout_url: Some("https://accept.paymob.com/unifiedcheckout/?clientSecret=CS_CANARY".into()),
+            checkout_url: Some(
+                "https://accept.paymob.com/unifiedcheckout/?clientSecret=CS_CANARY".into(),
+            ),
             livemode: false,
         };
         let p_dbg = format!("{payment:?}");

@@ -276,11 +276,7 @@ impl Drop for CheckoutSessionRequest {
 impl CheckoutSessionRequest {
     /// Creates a new [`CheckoutSessionRequest`] with [`CaptureMode::Automatic`].
     #[must_use]
-    pub fn new(
-        money: Money,
-        order_id: impl Into<String>,
-        success_url: impl Into<String>,
-    ) -> Self {
+    pub fn new(money: Money, order_id: impl Into<String>, success_url: impl Into<String>) -> Self {
         Self {
             provider_id: None,
             money,
@@ -813,19 +809,16 @@ mod tests {
 
         let mut meta = BTreeMap::new();
         meta.insert("env".into(), "test".into());
-        let checkout = CheckoutSessionRequest::new(
-            money.clone(),
-            "ORD-CHK-1",
-            "https://example.com/ok",
-        )
-        .with_provider_id(ProviderId::new("stripe"))
-        .with_cancel_url("https://example.com/cancel")
-        .with_description("Order 1")
-        .with_customer_email("buyer@example.com")
-        .with_customer_phone("+966501234567")
-        .with_capture_mode(CaptureMode::Manual)
-        .with_idempotency_key("chk-idem-1")
-        .with_metadata(meta);
+        let checkout =
+            CheckoutSessionRequest::new(money.clone(), "ORD-CHK-1", "https://example.com/ok")
+                .with_provider_id(ProviderId::new("stripe"))
+                .with_cancel_url("https://example.com/cancel")
+                .with_description("Order 1")
+                .with_customer_email("buyer@example.com")
+                .with_customer_phone("+966501234567")
+                .with_capture_mode(CaptureMode::Manual)
+                .with_idempotency_key("chk-idem-1")
+                .with_metadata(meta);
         assert!(checkout.validate().is_ok());
         assert_eq!(checkout.capture_mode, CaptureMode::Manual);
 
@@ -984,13 +977,10 @@ mod tests {
     #[test]
     fn validates_checkout_capture_void_and_refund_requests() {
         let money = Money::new(2_500, "USD").unwrap();
-        let mut checkout = CheckoutSessionRequest::new(
-            money.clone(),
-            "ORD-CHK",
-            "https://example.com/success",
-        )
-        .with_cancel_url("http://localhost:3000/cancel")
-        .with_idempotency_key("idem-1");
+        let mut checkout =
+            CheckoutSessionRequest::new(money.clone(), "ORD-CHK", "https://example.com/success")
+                .with_cancel_url("http://localhost:3000/cancel")
+                .with_idempotency_key("idem-1");
         assert!(checkout.validate().is_ok());
 
         checkout.success_url = "javascript:alert(1)".into();
@@ -1030,14 +1020,25 @@ mod tests {
             "non-ascii-\u{00E9}",
             &format!("{}K", " ".repeat(256)),
         ] {
-            let req = CreatePaymentRequest::new(money.clone(), "ORD-1")
-                .with_idempotency_key(bad_key);
-            assert!(req.validate().is_err(), "expected error for key {bad_key:?}");
+            let req =
+                CreatePaymentRequest::new(money.clone(), "ORD-1").with_idempotency_key(bad_key);
+            assert!(
+                req.validate().is_err(),
+                "expected error for key {bad_key:?}"
+            );
         }
 
-        for bad_order in ["ORD\r1", "ORD\n1", "ORD\01", &format!("{}O", " ".repeat(256))] {
+        for bad_order in [
+            "ORD\r1",
+            "ORD\n1",
+            "ORD\01",
+            &format!("{}O", " ".repeat(256)),
+        ] {
             let req = CreatePaymentRequest::new(money.clone(), bad_order);
-            assert!(req.validate().is_err(), "expected error for order {bad_order:?}");
+            assert!(
+                req.validate().is_err(),
+                "expected error for order {bad_order:?}"
+            );
         }
 
         let mut split_req = CreatePaymentRequest::new(money.clone(), "ORD-S");
@@ -1057,8 +1058,8 @@ mod tests {
         desc_req.description = Some("bad\0desc".into());
         assert!(desc_req.validate().is_err());
 
-        let void_long = VoidRequest::new(sample_reference())
-            .with_reason("r".repeat(MAX_REASON_LEN + 1));
+        let void_long =
+            VoidRequest::new(sample_reference()).with_reason("r".repeat(MAX_REASON_LEN + 1));
         assert!(void_long.validate().is_err());
 
         let refund_ctrl = RefundRequest::new(sample_reference()).with_reason("bad\r\nreason");
@@ -1143,14 +1144,11 @@ mod tests {
         let c_back: CreatePaymentRequest = serde_json::from_str(&c_json).unwrap();
         assert_eq!(c_back, create);
 
-        let checkout = CheckoutSessionRequest::new(
-            money.clone(),
-            "ORD-SERDE-2",
-            "https://example.com/ok",
-        )
-        .with_cancel_url("https://example.com/cancel")
-        .with_description("Hosted checkout")
-        .with_idempotency_key("idem-serde-2");
+        let checkout =
+            CheckoutSessionRequest::new(money.clone(), "ORD-SERDE-2", "https://example.com/ok")
+                .with_cancel_url("https://example.com/cancel")
+                .with_description("Hosted checkout")
+                .with_idempotency_key("idem-serde-2");
         let chk_json = serde_json::to_string(&checkout).unwrap();
         let chk_back: CheckoutSessionRequest = serde_json::from_str(&chk_json).unwrap();
         assert_eq!(chk_back, checkout);
