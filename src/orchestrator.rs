@@ -199,18 +199,17 @@ impl PaymentOrchestrator {
         req: &CreatePaymentRequest,
     ) -> Result<PaymentResult, PaymentError> {
         req.validate()?;
-        assert_positive_amount(&req.money)?;
-        let required = required_create_payment_caps(req);
-        let provider = self.resolve_for_request(
-            req.provider_id.as_ref(),
-            Some(req.money.currency()),
-            req.buyer_country.as_deref(),
-            required,
-        )?;
-        assert_capability(provider.as_ref(), required, "create_payment")?;
-        let ctx = HookContext::new(PaymentOperation::CreatePayment, provider.id().clone())
-            .with_money(req.money.clone())
-            .with_order_id(req.order_id.clone());
+        let (provider, ctx) = self.prepare_routed(RoutedPrep {
+            op: PaymentOperation::CreatePayment,
+            money: &req.money,
+            order_id: &req.order_id,
+            resolution: ResolutionInput {
+                explicit: req.provider_id.as_ref(),
+                currency: Some(req.money.currency()),
+                country: req.buyer_country.as_deref(),
+                required: required_create_payment_caps(req),
+            },
+        })?;
         self.execute_payment_op(ctx, || provider.create_payment(req))
             .await
     }
@@ -232,18 +231,17 @@ impl PaymentOrchestrator {
         req: &CheckoutSessionRequest,
     ) -> Result<PaymentResult, PaymentError> {
         req.validate()?;
-        assert_positive_amount(&req.money)?;
-        let required = required_checkout_caps(req);
-        let provider = self.resolve_for_request(
-            req.provider_id.as_ref(),
-            Some(req.money.currency()),
-            None,
-            required,
-        )?;
-        assert_capability(provider.as_ref(), required, "create_checkout")?;
-        let ctx = HookContext::new(PaymentOperation::CreateCheckout, provider.id().clone())
-            .with_money(req.money.clone())
-            .with_order_id(req.order_id.clone());
+        let (provider, ctx) = self.prepare_routed(RoutedPrep {
+            op: PaymentOperation::CreateCheckout,
+            money: &req.money,
+            order_id: &req.order_id,
+            resolution: ResolutionInput {
+                explicit: req.provider_id.as_ref(),
+                currency: Some(req.money.currency()),
+                country: None,
+                required: required_checkout_caps(req),
+            },
+        })?;
         self.execute_payment_op(ctx, || provider.create_checkout(req))
             .await
     }
@@ -283,16 +281,12 @@ impl PaymentOrchestrator {
     /// a `before` hook aborts execution, or the provider returns an error.
     pub async fn capture(&self, req: &CaptureRequest) -> Result<PaymentResult, PaymentError> {
         req.validate()?;
-        assert_optional_positive_amount(req.amount.as_ref())?;
-        let provider = self.registry.require(req.reference.provider_id())?;
-        let required = required_capture_caps(req);
-        assert_capability(provider.as_ref(), required, "capture")?;
-        let ctx = build_reference_context(
-            PaymentOperation::Capture,
-            provider.id().clone(),
-            &req.reference,
-            req.amount.clone(),
-        );
+        let (provider, ctx) = self.prepare_referenced(ReferencePrep {
+            op: PaymentOperation::Capture,
+            reference: &req.reference,
+            amount: req.amount.as_ref(),
+            required: required_capture_caps(req),
+        })?;
         self.execute_payment_op(ctx, || provider.capture(req)).await
     }
 
@@ -307,18 +301,12 @@ impl PaymentOrchestrator {
     /// a `before` hook aborts execution, or the provider returns an error.
     pub async fn void_payment(&self, req: &VoidRequest) -> Result<PaymentResult, PaymentError> {
         req.validate()?;
-        let provider = self.registry.require(req.reference.provider_id())?;
-        assert_capability(
-            provider.as_ref(),
-            PaymentCapabilities::VOID_AUTHORIZED,
-            "void_payment",
-        )?;
-        let ctx = build_reference_context(
-            PaymentOperation::VoidPayment,
-            provider.id().clone(),
-            &req.reference,
-            None,
-        );
+        let (provider, ctx) = self.prepare_referenced(ReferencePrep {
+            op: PaymentOperation::VoidPayment,
+            reference: &req.reference,
+            amount: None,
+            required: PaymentCapabilities::VOID_AUTHORIZED,
+        })?;
         self.execute_payment_op(ctx, || provider.void_payment(req))
             .await
     }
@@ -335,33 +323,62 @@ impl PaymentOrchestrator {
     /// a `before` hook aborts execution, or the provider returns an error.
     pub async fn refund(&self, req: &RefundRequest) -> Result<RefundResult, PaymentError> {
         req.validate()?;
-        assert_optional_positive_amount(req.amount.as_ref())?;
-        let provider = self.registry.require(req.reference.provider_id())?;
-        let required = required_refund_caps(req);
-        assert_capability(provider.as_ref(), required, "refund")?;
-        let ctx = build_reference_context(
-            PaymentOperation::Refund,
-            provider.id().clone(),
-            &req.reference,
-            req.amount.clone(),
-        );
+        let (provider, ctx) = self.prepare_referenced(ReferencePrep {
+            op: PaymentOperation::Refund,
+            reference: &req.reference,
+            amount: req.amount.as_ref(),
+            required: required_refund_caps(req),
+        })?;
         let (ctx, result) = self.execute_op(ctx, || provider.refund(req)).await?;
         self.hooks.run_after_refund(&ctx, &result).await;
         Ok(result)
     }
 
+    fn prepare_routed(
+        &self,
+        prep: RoutedPrep<'_>,
+    ) -> Result<(Arc<dyn PaymentProvider>, HookContext), PaymentError> {
+        assert_positive_amount(prep.money)?;
+        let required = prep.resolution.required;
+        let provider = self.resolve_for_request(prep.resolution)?;
+        assert_capability(provider.as_ref(), required, prep.op.as_str())?;
+        let ctx = HookContext::new(prep.op, provider.id().clone())
+            .with_money(prep.money.clone())
+            .with_order_id(prep.order_id.to_owned());
+        Ok((provider, ctx))
+    }
+
+    fn prepare_referenced(
+        &self,
+        prep: ReferencePrep<'_>,
+    ) -> Result<(Arc<dyn PaymentProvider>, HookContext), PaymentError> {
+        assert_optional_positive_amount(prep.amount)?;
+        let provider = self.registry.require(prep.reference.provider_id())?;
+        assert_capability(provider.as_ref(), prep.required, prep.op.as_str())?;
+        let ctx = build_reference_context(
+            prep.op,
+            provider.id().clone(),
+            prep.reference,
+            prep.amount.cloned(),
+        );
+        Ok((provider, ctx))
+    }
+
     fn resolve_for_request(
         &self,
-        explicit: Option<&ProviderId>,
-        currency: Option<&CurrencyCode>,
-        country: Option<&str>,
-        required: PaymentCapabilities,
+        input: ResolutionInput<'_>,
     ) -> Result<Arc<dyn PaymentProvider>, PaymentError> {
-        if let Some(id) = explicit {
+        if let Some(id) = input.explicit {
             return self.registry.require(id);
         }
         if let Some(resolver) = &self.route_resolver {
-            return resolver(&self.registry, None, currency, country, required);
+            return resolver(
+                &self.registry,
+                None,
+                input.currency,
+                input.country,
+                input.required,
+            );
         }
         Ok(self.registry.default_provider())
     }
@@ -398,6 +415,27 @@ impl PaymentOrchestrator {
         self.hooks.run_after(&ctx, &result).await;
         Ok(result)
     }
+}
+
+struct ResolutionInput<'a> {
+    explicit: Option<&'a ProviderId>,
+    currency: Option<&'a CurrencyCode>,
+    country: Option<&'a str>,
+    required: PaymentCapabilities,
+}
+
+struct RoutedPrep<'a> {
+    op: PaymentOperation,
+    money: &'a Money,
+    order_id: &'a str,
+    resolution: ResolutionInput<'a>,
+}
+
+struct ReferencePrep<'a> {
+    op: PaymentOperation,
+    reference: &'a ProviderReference,
+    amount: Option<&'a Money>,
+    required: PaymentCapabilities,
 }
 
 fn assert_positive_amount(money: &Money) -> Result<(), PaymentError> {
@@ -677,6 +715,15 @@ mod tests {
             }
             Ok(())
         }
+
+        fn counts(&self) -> (usize, usize, usize, usize) {
+            (
+                self.before.load(Ordering::SeqCst),
+                self.after.load(Ordering::SeqCst),
+                self.after_refund.load(Ordering::SeqCst),
+                self.on_error.load(Ordering::SeqCst),
+            )
+        }
     }
 
     #[async_trait]
@@ -825,34 +872,37 @@ mod tests {
         let orch = PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
         let created = orch.create_payment(&sample_create_req()).await.unwrap();
-        assert_eq!(created.status, PaymentStatus::Paid);
-
         let checkout = orch.create_checkout(&sample_checkout_req()).await.unwrap();
-        assert_eq!(checkout.status, PaymentStatus::RequiresAction);
-
         let fetched = orch.get_payment(&sample_ref("alpha")).await.unwrap();
-        assert_eq!(fetched.status, PaymentStatus::Paid);
-
         let captured = orch
             .capture(&sample_capture_req("alpha", Some(sample_money())))
             .await
             .unwrap();
-        assert_eq!(captured.status, PaymentStatus::Captured);
-
         let voided = orch.void_payment(&sample_void_req("alpha")).await.unwrap();
-        assert_eq!(voided.status, PaymentStatus::Voided);
-
         let refunded = orch
             .refund(&sample_refund_req("alpha", Some(sample_money())))
             .await
             .unwrap();
-        assert_eq!(refunded.status, RefundStatus::Succeeded);
 
-        assert_eq!(provider.call_count(), 6);
-        assert_eq!(hook.before.load(Ordering::SeqCst), 6);
-        assert_eq!(hook.after.load(Ordering::SeqCst), 5);
-        assert_eq!(hook.after_refund.load(Ordering::SeqCst), 1);
-        assert_eq!(hook.on_error.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            (
+                created.status,
+                checkout.status,
+                fetched.status,
+                captured.status,
+                voided.status,
+                refunded.status,
+            ),
+            (
+                PaymentStatus::Paid,
+                PaymentStatus::RequiresAction,
+                PaymentStatus::Paid,
+                PaymentStatus::Captured,
+                PaymentStatus::Voided,
+                RefundStatus::Succeeded,
+            )
+        );
+        assert_eq!((provider.call_count(), hook.counts()), (6, (6, 5, 1, 0)));
     }
 
     #[tokio::test]
@@ -917,8 +967,7 @@ mod tests {
         ];
         assert_eq!(manual_results, [Err(ErrorKind::Unsupported); 2]);
 
-        assert_eq!(provider.call_count(), 0);
-        assert_eq!(no_auth.call_count(), 0);
+        assert_eq!((provider.call_count(), no_auth.call_count()), (0, 0));
     }
 
     #[tokio::test]
@@ -940,9 +989,10 @@ mod tests {
         let orch = PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
         assert_eq!(run_all_six_ops(&orch, "alpha", None).await, [Ok(()); 6]);
-        assert_eq!(provider.call_count(), 6);
-        assert_eq!(failing_hook.after.load(Ordering::SeqCst), 5);
-        assert_eq!(failing_hook.after_refund.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            (provider.call_count(), failing_hook.counts()),
+            (6, (6, 5, 1, 0))
+        );
     }
 
     #[tokio::test]
@@ -955,11 +1005,7 @@ mod tests {
 
         let results = run_all_six_ops(&orch, "alpha", None).await;
         assert_eq!(results, [Err(ErrorKind::ProviderUnavailable); 6]);
-        assert_eq!(provider.call_count(), 6);
-        assert_eq!(hook.before.load(Ordering::SeqCst), 6);
-        assert_eq!(hook.after.load(Ordering::SeqCst), 0);
-        assert_eq!(hook.after_refund.load(Ordering::SeqCst), 0);
-        assert_eq!(hook.on_error.load(Ordering::SeqCst), 6);
+        assert_eq!((provider.call_count(), hook.counts()), (6, (6, 0, 0, 6)));
     }
 
     #[tokio::test]
@@ -990,15 +1036,25 @@ mod tests {
         let orch = PaymentOrchestrator::from_parts(registry, HookChain::default(), Some(resolver));
 
         let routed = orch.create_payment(&sample_create_req()).await.unwrap();
-        assert_eq!(routed.reference.provider_id().as_str(), "secondary");
-        assert_eq!(secondary.call_count(), 1);
-        assert_eq!(primary.call_count(), 0);
+        assert_eq!(
+            (
+                routed.reference.provider_id().as_str(),
+                secondary.call_count(),
+                primary.call_count(),
+            ),
+            ("secondary", 1, 0)
+        );
 
         let explicit_req = sample_create_req().with_provider_id(ProviderId::new("primary"));
         let overridden = orch.create_payment(&explicit_req).await.unwrap();
-        assert_eq!(overridden.reference.provider_id().as_str(), "primary");
-        assert_eq!(primary.call_count(), 1);
-        assert_eq!(secondary.call_count(), 1);
+        assert_eq!(
+            (
+                overridden.reference.provider_id().as_str(),
+                primary.call_count(),
+                secondary.call_count(),
+            ),
+            ("primary", 1, 1)
+        );
     }
 
     #[tokio::test]
@@ -1010,16 +1066,23 @@ mod tests {
             PaymentOrchestrator::new(single_provider_registry(provider.clone()), hooks);
 
         let bad_create = CreatePaymentRequest::new(sample_money(), "   ");
-        assert_eq!(outcome(orch.create_payment(&bad_create).await), Err(ErrorKind::Validation));
-
         let mut bad_capture = sample_capture_req("alpha", None);
         bad_capture.idempotency_key = Some("   ".to_owned());
-        assert_eq!(outcome(orch.capture(&bad_capture).await), Err(ErrorKind::Validation));
 
-        assert_eq!(provider.call_count(), 0);
-        assert_eq!(hook.before.load(Ordering::SeqCst), 0);
-        assert!(format!("{orch:?}").contains("PaymentOrchestrator"));
-        assert_eq!(orch.registry().default_provider().id().as_str(), "alpha");
-        assert!(format!("{:?}", orch.hooks()).contains("HookChain"));
+        let results = [
+            outcome(orch.create_payment(&bad_create).await),
+            outcome(orch.capture(&bad_capture).await),
+        ];
+        assert_eq!(results, [Err(ErrorKind::Validation); 2]);
+        assert_eq!(
+            (
+                provider.call_count(),
+                hook.before.load(Ordering::SeqCst),
+                format!("{orch:?}").contains("PaymentOrchestrator"),
+                orch.registry().default_provider().id().as_str(),
+                format!("{:?}", orch.hooks()).contains("HookChain"),
+            ),
+            (0, 0, true, "alpha", true)
+        );
     }
 }

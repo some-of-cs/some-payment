@@ -84,10 +84,23 @@ use some_payment_core::{PaymentCapabilities, PaymentError, PaymentProvider, Prov
 /// assert_eq!(registry.default_id(), &id);
 /// assert!(registry.require(&id).is_ok());
 /// ```
+///
+/// # Immutability
+///
+/// Internal registry fields are private and cannot be mutated post-build:
+///
+/// ```compile_fail
+/// use some_payment::registry::ProviderRegistry;
+///
+/// fn cannot_mutate_fields(registry: &mut ProviderRegistry) {
+///     let _ = &mut registry.providers;
+/// }
+/// ```
 #[derive(Clone, Debug)]
 pub struct ProviderRegistry {
     providers: Arc<HashMap<ProviderId, Arc<dyn PaymentProvider>>>,
     default_id: ProviderId,
+    default_provider: Arc<dyn PaymentProvider>,
 }
 
 impl ProviderRegistry {
@@ -107,14 +120,15 @@ impl ProviderRegistry {
                 "provider registry must contain at least one registered provider",
             ));
         }
-        if !providers.contains_key(&default_id) {
-            return Err(PaymentError::configuration(format!(
+        let default_provider = providers.get(&default_id).cloned().ok_or_else(|| {
+            PaymentError::configuration(format!(
                 "default provider '{default_id}' is not registered in the provider registry"
-            )));
-        }
+            ))
+        })?;
         Ok(Self {
             providers: Arc::new(providers),
             default_id,
+            default_provider,
         })
     }
 
@@ -148,11 +162,7 @@ impl ProviderRegistry {
     /// Returns the configured default [`PaymentProvider`].
     #[must_use]
     pub fn default_provider(&self) -> Arc<dyn PaymentProvider> {
-        Arc::clone(
-            self.providers
-                .get(&self.default_id)
-                .expect("default_id is validated during ProviderRegistry::new"),
-        )
+        Arc::clone(&self.default_provider)
     }
 
     /// Resolves an explicit provider ID if supplied, or falls back to the default provider.

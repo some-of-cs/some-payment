@@ -498,12 +498,25 @@ mod tests {
 
     #[test]
     fn operation_as_str_covers_all_variants() {
-        assert_eq!(PaymentOperation::CreatePayment.as_str(), "create_payment");
-        assert_eq!(PaymentOperation::CreateCheckout.as_str(), "create_checkout");
-        assert_eq!(PaymentOperation::GetPayment.as_str(), "get_payment");
-        assert_eq!(PaymentOperation::Capture.as_str(), "capture");
-        assert_eq!(PaymentOperation::VoidPayment.as_str(), "void_payment");
-        assert_eq!(PaymentOperation::Refund.as_str(), "refund");
+        let actual = [
+            PaymentOperation::CreatePayment.as_str(),
+            PaymentOperation::CreateCheckout.as_str(),
+            PaymentOperation::GetPayment.as_str(),
+            PaymentOperation::Capture.as_str(),
+            PaymentOperation::VoidPayment.as_str(),
+            PaymentOperation::Refund.as_str(),
+        ];
+        assert_eq!(
+            actual,
+            [
+                "create_payment",
+                "create_checkout",
+                "get_payment",
+                "capture",
+                "void_payment",
+                "refund",
+            ]
+        );
     }
 
     #[test]
@@ -516,33 +529,46 @@ mod tests {
         ctx.insert_attribute("api_token", "sk_live_super_secret_12345");
         ctx.insert_attribute("customer_email", "alice@example.com");
 
-        assert_eq!(ctx.operation(), PaymentOperation::CreatePayment);
-        assert_eq!(ctx.provider_id().as_str(), "alpha");
-        assert_eq!(ctx.money().map(Money::amount), Some(9900));
-        assert_eq!(ctx.order_id(), Some("ord_42"));
-        assert_eq!(ctx.reference_id(), Some("ref_99"));
         assert_eq!(
-            ctx.attributes().get("api_token").map(String::as_str),
-            Some("sk_live_super_secret_12345")
+            (
+                ctx.operation(),
+                ctx.provider_id().as_str(),
+                ctx.money().map(Money::amount),
+                ctx.order_id(),
+                ctx.reference_id(),
+                ctx.attributes().get("api_token").map(String::as_str),
+            ),
+            (
+                PaymentOperation::CreatePayment,
+                "alpha",
+                Some(9900),
+                Some("ord_42"),
+                Some("ref_99"),
+                Some("sk_live_super_secret_12345"),
+            )
         );
 
         let debug_output = format!("{ctx:?}");
-        assert!(debug_output.contains("api_token"));
-        assert!(debug_output.contains("[REDACTED]"));
-        assert!(!debug_output.contains("sk_live_super_secret_12345"));
-        assert!(!debug_output.contains("alice@example.com"));
+        assert_eq!(
+            (
+                debug_output.contains("api_token"),
+                debug_output.contains("[REDACTED]"),
+                debug_output.contains("sk_live_super_secret_12345"),
+                debug_output.contains("alice@example.com"),
+            ),
+            (true, true, false, false)
+        );
     }
 
     #[test]
     fn hook_chain_default_len_and_is_empty() {
         let empty = HookChain::default();
-        assert_eq!(empty.len(), 0);
-        assert!(empty.is_empty());
-
         let events = Arc::new(Mutex::new(Vec::new()));
         let chain = HookChain::new(vec![Arc::new(RecordingHook::new("h1", events))]);
-        assert_eq!(chain.len(), 1);
-        assert!(!chain.is_empty());
+        assert_eq!(
+            (empty.len(), empty.is_empty(), chain.len(), chain.is_empty()),
+            (0, true, 1, false)
+        );
     }
 
     #[tokio::test]
@@ -562,14 +588,13 @@ mod tests {
             vec!["before:first".to_owned(), "before:second".to_owned()]
         );
         assert_eq!(
-            ctx.attributes().get("seen_first").map(String::as_str),
-            Some("yes")
+            (
+                ctx.attributes().get("seen_first").map(String::as_str),
+                ctx.attributes().get("seen_second").map(String::as_str),
+                ctx.money().map(Money::amount),
+            ),
+            (Some("yes"), Some("yes"), Some(1500))
         );
-        assert_eq!(
-            ctx.attributes().get("seen_second").map(String::as_str),
-            Some("yes")
-        );
-        assert_eq!(ctx.money().map(Money::amount), Some(1500));
     }
 
     #[tokio::test]
@@ -670,18 +695,19 @@ mod tests {
         }
 
         let hook = NoopHook;
-        assert_eq!(hook.name(), "noop");
-
         let mut ctx = HookContext::new(PaymentOperation::GetPayment, ProviderId::new("alpha"));
-        assert_eq!(hook.before(&mut ctx).await, HookDecision::Proceed);
-
         let payment_result = sample_payment_result();
-        assert!(hook.after(&ctx, &payment_result).await.is_ok());
-
         let refund_result = sample_refund_result();
-        assert!(hook.after_refund(&ctx, &refund_result).await.is_ok());
-
         let error = PaymentError::configuration("noop error");
+
+        let before = hook.before(&mut ctx).await;
+        let after_ok = hook.after(&ctx, &payment_result).await.is_ok();
+        let after_refund_ok = hook.after_refund(&ctx, &refund_result).await.is_ok();
         hook.on_error(&ctx, &error).await;
+
+        assert_eq!(
+            (hook.name(), before, after_ok, after_refund_ok),
+            ("noop", HookDecision::Proceed, true, true)
+        );
     }
 }
