@@ -326,6 +326,8 @@ pub fn verify_order_money(expected: &Money, actual: &Money) -> Result<(), Paymen
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use some_payment_core::{ErrorKind, Money, PaymentStatus, ProviderId};
 
     use super::{
