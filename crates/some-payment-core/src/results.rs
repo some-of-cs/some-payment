@@ -296,7 +296,7 @@ impl Drop for RawWebhookRequest {
 }
 
 fn normalize_headers_fail_closed(headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
-    let mut normalized = BTreeMap::new();
+    let mut normalized: BTreeMap<String, String> = BTreeMap::new();
     let mut collided = BTreeSet::new();
     for (key, mut value) in headers {
         let lower = key.to_ascii_lowercase();

@@ -44,7 +44,10 @@ Add the workspace crate directly from git or your local workspace path:
 
 ```toml
 [dependencies]
-some-payment-core = { path = "crates/some-payment-core" }
+# External applications:
+some-payment-core = { git = "https://github.com/some-of-cs/some-payment", package = "some-payment-core" }
+# Or inside a checkout of this workspace:
+# some-payment-core = { path = "crates/some-payment-core" }
 async-trait = "0.1"
 ```
 
@@ -105,7 +108,7 @@ impl PaymentProvider for CustomGateway {
     }
 
     fn capabilities(&self) -> PaymentCapabilities {
-        PaymentCapabilities::DIRECT_PAYMENT
+        PaymentCapabilities::empty()
     }
 
     async fn create_payment(

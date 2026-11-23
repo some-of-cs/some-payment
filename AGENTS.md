@@ -64,7 +64,7 @@ struct MyProvider(ProviderId);
 #[async_trait]
 impl PaymentProvider for MyProvider {
     fn id(&self) -> &ProviderId { &self.0 }
-    fn capabilities(&self) -> PaymentCapabilities { PaymentCapabilities::DIRECT_PAYMENT }
+    fn capabilities(&self) -> PaymentCapabilities { PaymentCapabilities::empty() }
     async fn create_payment(&self, req: &CreatePaymentRequest) -> Result<PaymentResult, PaymentError> {
         req.validate()?;
         Err(PaymentError::unsupported(&self.0, "create_payment"))

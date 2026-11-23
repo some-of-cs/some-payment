@@ -542,7 +542,7 @@ impl RefundRequest {
 }
 
 fn has_control_chars(value: &str) -> bool {
-    value.bytes().any(|b| b.is_ascii_control())
+    value.chars().any(char::is_control)
 }
 
 fn validate_optional_bounded_text(
@@ -1032,6 +1032,7 @@ mod tests {
             "ORD\r1",
             "ORD\n1",
             "ORD\x001",
+            "ORD\u{0085}1",
             &format!("{}O", " ".repeat(256)),
         ] {
             let req = CreatePaymentRequest::new(money.clone(), bad_order);
@@ -1040,6 +1041,10 @@ mod tests {
                 "expected error for order {bad_order:?}"
             );
         }
+
+        let mut unicode_ok = CreatePaymentRequest::new(money.clone(), "ORD-café-1");
+        unicode_ok.description = Some("Order café".into());
+        assert!(unicode_ok.validate().is_ok());
 
         let mut split_req = CreatePaymentRequest::new(money.clone(), "ORD-S");
         split_req.splits.push(SplitInstruction {
