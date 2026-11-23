@@ -52,19 +52,7 @@ impl RoutingPolicy for RegionalCurrencyRouter {
         ctx: &RoutingContext,
         registry: &ProviderRegistry,
     ) -> Result<ProviderId, PaymentError> {
-        let currency = ctx
-            .currency
-            .as_ref()
-            .and_then(|code| lookup_static_route(REGIONAL_CURRENCY_ROUTES, code.as_str()));
-        let country = ctx
-            .buyer_country
-            .as_deref()
-            .map(normalize_code)
-            .and_then(|code| lookup_static_route(REGIONAL_COUNTRY_ROUTES, &code));
-        let international = Some(ProviderId::new(INTERNATIONAL_DEFAULT_SLUG));
-        let candidates = [currency, country, international].into_iter().flatten();
-
-        select_with_candidates(ctx, registry, candidates)
+        select_from_table(self, ctx, registry)
     }
 }
 
@@ -142,21 +130,7 @@ impl RoutingPolicy for CountryRoutingPolicy {
         ctx: &RoutingContext,
         registry: &ProviderRegistry,
     ) -> Result<ProviderId, PaymentError> {
-        let currency = ctx
-            .currency
-            .as_ref()
-            .and_then(|code| self.currency_routes.get(code.as_str()))
-            .cloned();
-        let country = ctx
-            .buyer_country
-            .as_deref()
-            .map(normalize_code)
-            .and_then(|code| self.country_routes.get(&code))
-            .cloned();
-        let fallback = self.fallback.clone();
-        let candidates = [currency, country, fallback].into_iter().flatten();
-
-        select_with_candidates(ctx, registry, candidates)
+        select_from_table(self, ctx, registry)
     }
 }
 
@@ -234,6 +208,56 @@ fn insert_normalized(
     if !normalized.is_empty() {
         map.insert(normalized, provider_id);
     }
+}
+
+trait RouteTable {
+    fn currency(&self, code: &str) -> Option<ProviderId>;
+    fn country(&self, code: &str) -> Option<ProviderId>;
+    fn fallback(&self) -> Option<ProviderId>;
+}
+
+impl RouteTable for RegionalCurrencyRouter {
+    fn currency(&self, code: &str) -> Option<ProviderId> {
+        lookup_static_route(REGIONAL_CURRENCY_ROUTES, code)
+    }
+
+    fn country(&self, code: &str) -> Option<ProviderId> {
+        lookup_static_route(REGIONAL_COUNTRY_ROUTES, code)
+    }
+
+    fn fallback(&self) -> Option<ProviderId> {
+        Some(ProviderId::new(INTERNATIONAL_DEFAULT_SLUG))
+    }
+}
+
+impl RouteTable for CountryRoutingPolicy {
+    fn currency(&self, code: &str) -> Option<ProviderId> {
+        self.currency_routes.get(code).cloned()
+    }
+
+    fn country(&self, code: &str) -> Option<ProviderId> {
+        self.country_routes.get(code).cloned()
+    }
+
+    fn fallback(&self) -> Option<ProviderId> {
+        self.fallback.clone()
+    }
+}
+
+fn select_from_table<T: RouteTable>(
+    table: &T,
+    ctx: &RoutingContext,
+    registry: &ProviderRegistry,
+) -> Result<ProviderId, PaymentError> {
+    let currency = ctx.currency.as_ref().and_then(|code| table.currency(code.as_str()));
+    let country = ctx
+        .buyer_country
+        .as_deref()
+        .map(normalize_code)
+        .and_then(|code| table.country(&code));
+    let candidates = [currency, country, table.fallback()].into_iter().flatten();
+
+    select_with_candidates(ctx, registry, candidates)
 }
 
 fn select_with_candidates(

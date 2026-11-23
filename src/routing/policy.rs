@@ -322,8 +322,7 @@ mod tests {
     #[test]
     fn tm_6_default_only_policy_rejects_unregistered_explicit_provider() {
         let registry = test_registry();
-        let ctx = RoutingContext::new()
-            .with_explicit_provider(ProviderId::new("unknown_provider"));
+        let ctx = RoutingContext::new().with_explicit_provider(ProviderId::new("unknown_provider"));
 
         let err = DefaultOnlyPolicy
             .select(&ctx, &registry)
@@ -397,7 +396,10 @@ mod tests {
         );
         assert_eq!(ctx.currency.as_ref().map(CurrencyCode::as_str), Some("SAR"));
         assert_eq!(ctx.buyer_country.as_deref(), Some("SA"));
-        assert_eq!(ctx.required_capabilities, PaymentCapabilities::DIRECT_PAYMENT);
+        assert_eq!(
+            ctx.required_capabilities,
+            PaymentCapabilities::DIRECT_PAYMENT
+        );
     }
 
     #[test]

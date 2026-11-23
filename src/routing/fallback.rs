@@ -558,7 +558,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(*calls.lock().unwrap(), vec!["alpha", "beta", "gamma", "delta"]);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["alpha", "beta", "gamma", "delta"]
+        );
         assert_eq!(err.provider().map(ProviderId::as_str), Some("delta"));
     }
 

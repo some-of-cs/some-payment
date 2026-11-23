@@ -92,6 +92,22 @@ fn validate_pin<R: ProviderLookup>(
 ///     Ok(())
 /// }
 /// ```
+///
+/// Pinned provider fields are private and cannot be mutated after build:
+///
+/// ```compile_fail
+/// use some_payment::registry::ProviderRegistry;
+/// use some_payment::routing::pipeline::ComposablePipeline;
+/// use some_payment_core::{PaymentError, ProviderId};
+///
+/// fn mutate_after_build(registry: &ProviderRegistry) -> Result<(), PaymentError> {
+///     let mut pipeline = ComposablePipeline::builder()
+///         .direct_payments(ProviderId::new("stripe"))
+///         .build(registry)?;
+///     pipeline.direct_payments = Some(ProviderId::new("paymob"));
+///     Ok(())
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComposablePipeline {
     direct_payments: Option<ProviderId>,
@@ -470,11 +486,23 @@ mod tests {
             .build_with(&registry)
             .expect("all pinned providers are registered and capable");
 
-        assert_eq!(pipeline.direct_payments_provider(), Some(&ProviderId::new("stripe")));
-        assert_eq!(pipeline.hosted_checkout_provider(), Some(&ProviderId::new("paymob")));
-        assert_eq!(pipeline.captures_provider(), Some(&ProviderId::new("stripe")));
+        assert_eq!(
+            pipeline.direct_payments_provider(),
+            Some(&ProviderId::new("stripe"))
+        );
+        assert_eq!(
+            pipeline.hosted_checkout_provider(),
+            Some(&ProviderId::new("paymob"))
+        );
+        assert_eq!(
+            pipeline.captures_provider(),
+            Some(&ProviderId::new("stripe"))
+        );
         assert_eq!(pipeline.voids_provider(), Some(&ProviderId::new("stripe")));
-        assert_eq!(pipeline.refunds_provider(), Some(&ProviderId::new("moyasar")));
+        assert_eq!(
+            pipeline.refunds_provider(),
+            Some(&ProviderId::new("moyasar"))
+        );
     }
 
     #[test]
