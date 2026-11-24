@@ -1,5 +1,7 @@
 //! Distributed [`IdempotencyStore`] contract for non-idempotent gateway mutations.
 
+use std::fmt;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +20,7 @@ pub struct IdempotencyEntry<'a> {
 
 impl<'a> IdempotencyEntry<'a> {
     /// Creates a new [`IdempotencyEntry`].
+    #[must_use]
     pub const fn new(scope: &'a str, key: &'a str, ttl_secs: u64) -> Self {
         Self {
             scope,
@@ -28,7 +31,10 @@ impl<'a> IdempotencyEntry<'a> {
 }
 
 /// Atomic lock reservation outcome returned by [`IdempotencyStore::reserve`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Implements custom [`fmt::Debug`] so cached payloads inside
+/// [`ReserveOutcome::Completed`] are always redacted as `"[REDACTED]"`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReserveOutcome {
     /// Caller acquired the atomic lock and may invoke the provider mutation.
     Acquired,
@@ -36,6 +42,16 @@ pub enum ReserveOutcome {
     Completed(serde_json::Value),
     /// Another worker holds the active lock; fail with [`PaymentError::IdempotencyConflict`].
     InProgress,
+}
+
+impl fmt::Debug for ReserveOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Acquired => f.write_str("Acquired"),
+            Self::Completed(_) => f.debug_tuple("Completed").field(&"[REDACTED]").finish(),
+            Self::InProgress => f.write_str("InProgress"),
+        }
+    }
 }
 
 /// Pluggable distributed idempotency store (backed by Redis `SET NX EX` or
@@ -60,9 +76,18 @@ pub enum ReserveOutcome {
 #[async_trait]
 pub trait IdempotencyStore: Send + Sync {
     /// Atomically attempts to acquire a lock for `entry`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError`] if the backing store is unreachable, returns a
+    /// storage error, or cannot deserialize a cached payload.
     async fn reserve(&self, entry: &IdempotencyEntry<'_>) -> Result<ReserveOutcome, PaymentError>;
 
     /// Marks `entry` as completed and caches the redacted serialized response.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError`] if persisting the completed payload fails.
     async fn complete(
         &self,
         entry: &IdempotencyEntry<'_>,
@@ -72,6 +97,11 @@ pub trait IdempotencyStore: Send + Sync {
     /// Releases a lock strictly after a definitive pre-flight or 4xx rejection.
     ///
     /// NEVER call after a 5xx error or network timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaymentError`] if deleting the lock from the backing store
+    /// fails.
     async fn release(&self, scope: &str, key: &str) -> Result<(), PaymentError>;
 }
 
@@ -145,5 +175,25 @@ mod tests {
 
         assert_eq!(mock.completed_calls.load(Ordering::SeqCst), 1);
         assert_eq!(mock.released_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn reserve_outcome_serde_round_trip_and_debug_redaction() {
+        let samples = [
+            ReserveOutcome::Acquired,
+            ReserveOutcome::Completed(serde_json::json!({"secret": "CANARY_IDEM_PAYLOAD"})),
+            ReserveOutcome::InProgress,
+        ];
+        for sample in &samples {
+            let json = serde_json::to_string(sample).unwrap();
+            let decoded: ReserveOutcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(&decoded, sample);
+        }
+
+        let dbg = format!("{:?}", samples[1]);
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("CANARY_IDEM_PAYLOAD"));
+        assert_eq!(format!("{:?}", ReserveOutcome::Acquired), "Acquired");
+        assert_eq!(format!("{:?}", ReserveOutcome::InProgress), "InProgress");
     }
 }

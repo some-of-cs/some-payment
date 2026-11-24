@@ -3,313 +3,180 @@
 <div align="center">
 
 > **Unified, multi-gateway Rust payment router and composable capability orchestrator.**  
-> Run multiple payment gateways simultaneously • Dynamic country & currency routing • Mix-and-match KYC, checkout, and payout capabilities across [`some-stripe`](https://github.com/some-of-cs/some-stripe), [`some-paymob`](https://github.com/some-of-cs/some-paymob), [`some-moyasar`](https://github.com/some-of-cs/some-moyasar), and future providers
+> Shipped core SPI & domain primitives (`some-payment-core`) • Planned multi-gateway orchestrator & routing across [`some-stripe`](https://github.com/some-of-cs/some-stripe), [`some-paymob`](https://github.com/some-of-cs/some-paymob), [`some-moyasar`](https://github.com/some-of-cs/some-moyasar), and future providers
 
-[![Crates.io](https://img.shields.io/crates/v/some-payment.svg)](https://crates.io/crates/some-payment)
-[![Docs.rs](https://docs.rs/some-payment/badge.svg)](https://docs.rs/some-payment)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust: Edition 2024](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://github.com/some-of-cs/some-payment)
+[![MSRV: 1.85](https://img.shields.io/badge/MSRV-1.85-blue.svg)](Cargo.toml)
 [![Providers: Stripe | Paymob | Moyasar](https://img.shields.io/badge/providers-Stripe%20%7C%20Paymob%20%7C%20Moyasar-8a2be2.svg)](#first-party-provider-ecosystem)
 [![Sponsor](https://img.shields.io/badge/Sponsor-%E2%99%A5-ff69b4.svg)](https://github.com/sponsors/maheraladdin)
 
-[Why some-payment?](#why-some-payment) •
+[Workspace Status](#workspace-status) •
+[Core Crate Quick Start](#quick-start-some-payment-core-shipped) •
 [Provider Ecosystem](#first-party-provider-ecosystem) •
-[Architecture](#architecture-country-routing--composable-capabilities) •
-[Quick Start](#quick-start) •
-[Cross-Gateway Composition](#2-cross-gateway-capability-composition-stripe-kyc--paymob-payment--payouts) •
-[Unified Webhook Router](#3-unified-multi-gateway-webhook-dispatcher) •
-[Extensibility](#adding-future-payment-gateways) •
-[Sponsors](#backers--corporate-sponsors)
+[Planned Architecture](#planned-architecture-modules-25) •
+[Sponsors](#backers--corporate-sponsors) •
+[Contributing](#contributing)
 
 </div>
 
 ---
 
-## Why some-payment?
+## Workspace Status
 
-Global and MENA platforms rarely survive on a single payment processor. A marketplace operating across North America, Europe, Saudi Arabia, and Egypt needs:
+`some-payment` is developed incrementally across five modules tracked in [`docs/architecture/DECOMPOSITION_ROADMAP.md`](docs/architecture/DECOMPOSITION_ROADMAP.md) (see [`docs/`](docs/) for full specifications):
 
-1. **Simultaneous Multi-Gateway Execution**: Running [Stripe](https://docs.stripe.com/api), [Paymob](https://developers.paymob.com/), and [Moyasar](https://docs.moyasar.com/api/api-introduction) concurrently in the same binary without conflicting HTTP clients, incompatible currency representations, or tangled error types.
-2. **Dynamic Country- & Currency-Based Gateway Switching**: Automatically routing a customer in Saudi Arabia (`SA`) to [`some-moyasar`](https://github.com/some-of-cs/some-moyasar) (for local Mada debit cards, STC Pay, and SADAD bills), a customer in Egypt (`EG`) to [`some-paymob`](https://github.com/some-of-cs/some-paymob) (for Meza, Vodafone Cash, Fawry Kiosk, and ValU BNPL), and a customer in the US/EU (`US`, `DE`, `GB`) to [`some-stripe`](https://github.com/some-of-cs/some-stripe)—with automatic health-aware fallback if a primary gateway experiences downtime.
-3. **Cross-Gateway Capability Composition (Mix & Match Features)**: Regional gateways excel at local payment collection and local bank/wallet payouts, but often lack global identity verification (KYC) or global tax engines. `some-payment` decouples **capabilities** (`KycCapability`, `PaymentCapability`, `PayoutCapability`, `SubscriptionCapability`, `WebhookCapability`) from monolithic gateway structs. You can verify a user's passport and biometric selfie using **[`some-stripe`](https://github.com/some-of-cs/some-stripe) Identity KYC**, collect the checkout payment in `EGP` using **[`some-paymob`](https://github.com/some-of-cs/some-paymob)**, and disburse vendor earnings via **[`some-paymob`](https://github.com/some-of-cs/some-paymob) Payouts** (or **[`some-moyasar`](https://github.com/some-of-cs/some-moyasar) SARIE/IPS** in Saudi Arabia) within one unified pipeline.
-4. **Future-Proof Plugin Architecture**: Trait-driven provider registration makes adding future gateways (Adyen, Checkout.com, Tap Payments, HyperPay, Tamara, Tabby, PayPal, Wise) a zero-breaking-change extension.
+| Module | Crate / Scope | Status on `main` |
+| :--- | :--- | :---: |
+| **Module 1** | `crates/some-payment-core` — HTTP-free domain primitives (`Money`, `CurrencyCode`, `ProviderId`, `ProviderReference`), `PaymentCapabilities` bitmask, `PaymentProvider` SPI, `IdempotencyStore` contract, secret-redacted `PaymentError` | **Shipped** |
+| **Module 2** | `some-payment` Orchestrator, Registry & Country/Currency Routing Policies | *Planned* |
+| **Module 3** | Distributed Idempotency Middleware, Lifecycle Hooks & Reliability Guards | *Planned* |
+| **Module 4** | First-Party Gateway Adapters (`some-stripe`, `some-moyasar`, `some-paymob`) | *Planned* |
+| **Module 5** | Unified Webhook Dispatcher, Composable Pipelines & End-to-End Integration Suite | *Planned* |
+
+For AI coding agents working in this repository, see [`AGENTS.md`](AGENTS.md) for a compact API cheat sheet and hard security invariants.
+
+---
+
+## Quick Start: `some-payment-core` (Shipped)
+
+Add the workspace crate directly from git or your local workspace path:
+
+```toml
+[dependencies]
+# External applications:
+some-payment-core = { git = "https://github.com/some-of-cs/some-payment", package = "some-payment-core" }
+# Or inside a checkout of this workspace:
+# some-payment-core = { path = "crates/some-payment-core" }
+async-trait = "0.1"
+```
+
+### 1. Validated Domain Primitives & Requests
+
+`some-payment-core` enforces integer minor-unit `Money` (never floats), normalized `ProviderId` slugs, path-traversal-safe `ProviderReference` builders, and strict request validation:
+
+```rust
+use some_payment_core::{
+    CaptureMode, CreatePaymentRequest, Money, PaymentCapabilities, PaymentError,
+    ProviderId, ProviderReference,
+};
+
+fn build_validated_request() -> Result<CreatePaymentRequest, PaymentError> {
+    let money = Money::new(15_000, "SAR")?; // 150.00 SAR in halalas
+    let provider = ProviderId::try_new("moyasar")?;
+
+    let req = CreatePaymentRequest::new(money, "ORD-SA-9901")
+        .with_provider_id(provider.clone())
+        .with_capture_mode(CaptureMode::Manual)
+        .with_idempotency_key("550e8400-e29b-41d4-a716-446655440000");
+
+    // Always validate request DTOs before dispatching to a provider.
+    req.validate()?;
+
+    let reference = ProviderReference::builder(provider)
+        .payment_id("pay_01J9EXAMPLE")
+        .order_id("ORD-SA-9901")
+        .build()?;
+    assert_eq!(reference.order_id(), Some("ORD-SA-9901"));
+
+    let caps = PaymentCapabilities::DIRECT_PAYMENT | PaymentCapabilities::REFUND;
+    assert!(caps.contains(PaymentCapabilities::REFUND));
+    Ok(req)
+}
+```
+
+### 2. Implementing the Open `PaymentProvider` SPI
+
+First-party and third-party gateway crates implement `PaymentProvider` against `some-payment-core` without depending on the orchestrator. Optional lifecycle methods (`create_checkout`, `capture`, `void_payment`, `refund`) fail closed by default with `PaymentError::Unsupported`:
+
+```rust
+use async_trait::async_trait;
+use some_payment_core::{
+    CreatePaymentRequest, NormalizedWebhookEvent, PaymentCapabilities, PaymentError,
+    PaymentProvider, PaymentResult, ProviderId, ProviderReference, RawWebhookRequest,
+};
+
+#[derive(Debug)]
+pub struct CustomGateway {
+    id: ProviderId,
+}
+
+#[async_trait]
+impl PaymentProvider for CustomGateway {
+    fn id(&self) -> &ProviderId {
+        &self.id
+    }
+
+    fn capabilities(&self) -> PaymentCapabilities {
+        PaymentCapabilities::empty()
+    }
+
+    async fn create_payment(
+        &self,
+        req: &CreatePaymentRequest,
+    ) -> Result<PaymentResult, PaymentError> {
+        req.validate()?;
+        Err(PaymentError::unsupported(&self.id, "create_payment"))
+    }
+
+    async fn get_payment(
+        &self,
+        _reference: &ProviderReference,
+    ) -> Result<PaymentResult, PaymentError> {
+        Err(PaymentError::unsupported(&self.id, "get_payment"))
+    }
+
+    async fn parse_and_verify_webhook(
+        &self,
+        _raw: &RawWebhookRequest,
+    ) -> Result<NormalizedWebhookEvent, PaymentError> {
+        Err(PaymentError::unsupported(&self.id, "parse_and_verify_webhook"))
+    }
+}
+```
 
 ---
 
 ## First-Party Provider Ecosystem
 
-`some-payment` is the umbrella orchestrator for our production-grade Rust payment SDKs:
+`some-payment` is designed as the umbrella orchestrator for our Rust payment SDKs:
 
-| Provider Crate | Target Regions | Supported Capabilities in `some-payment` | Underlying Gateway Docs |
+| Provider Crate | Target Regions | Planned Capabilities | Underlying Gateway Docs |
 | :--- | :--- | :--- | :--- |
-| **[`some-stripe`](https://github.com/some-of-cs/some-stripe)** | Global (`US`, `EU`, `GB`, `CA`, `AU`, 45+ countries) | **Payments** ([PaymentIntents](https://docs.stripe.com/api/payment_intents/confirm), Checkout), **KYC** (`Stripe Identity`), **Payouts** (`Connect`), **Tax** (`Stripe Tax`), **Billing**, **Webhooks** (`HMAC-SHA256`) | [Stripe API Reference](https://docs.stripe.com/api) |
-| **[`some-paymob`](https://github.com/some-of-cs/some-paymob)** | Egypt & MENA (`EG`, `AE`, `OM`, `PK`, `SA`) | **Payments** ([Intention API](https://developers.paymob.com/paymob-docs/intention-apis/create-intention), Cards, Vodafone Cash, Fawry Kiosk, ValU BNPL), **Payouts** ([Paymob Send](https://developers.paymob.com/paymob-docs/beyond-payments/payouts)), **Subscriptions**, **Webhooks** ([HMAC-SHA512](https://developers.paymob.com/paymob-docs/developers/webhook-callbacks-and-hmac/hmac/hmac-transaction-callback)) | [Paymob Developer Portal](https://developers.paymob.com/) |
-| **[`some-moyasar`](https://github.com/some-of-cs/some-moyasar)** | Saudi Arabia & GCC (`SA`, `KW`, `BH`, `QA`, `AE`) | **Payments** ([Payments](https://docs.moyasar.com/api/payments/01-create-payment) & [Payment Intents](https://docs.moyasar.com/guides/payment-intents/overview), Mada, STC Pay, SADAD, Apple Pay), **Payouts** ([SARIE & IPS Bulk Payouts](https://docs.moyasar.com/api/payouts/05-list-payouts)), **Settlements**, **Webhooks** ([Constant-Time Secret Verifier](https://docs.moyasar.com/api/other/webhooks/webhook-reference)) | [Moyasar Online Docs](https://docs.moyasar.com/api/api-introduction) |
-| **Future Gateways** *(Planned)* | Global & Regional | `some-tap`, `some-hyperpay`, `some-checkout`, `some-adyen`, `some-tabby`, `some-tamara` via the open `GatewayProvider` trait | Extensible via `some-payment-core` |
+| **[`some-stripe`](https://github.com/some-of-cs/some-stripe)** | Global (`US`, `EU`, `GB`, `CA`, `AU`, 45+ countries) | Payments ([PaymentIntents](https://docs.stripe.com/api/payment_intents/confirm), Checkout), KYC (`Stripe Identity`), Payouts (`Connect`), Webhooks (`HMAC-SHA256`) | [Stripe API Reference](https://docs.stripe.com/api) |
+| **[`some-paymob`](https://github.com/some-of-cs/some-paymob)** | Egypt & MENA (`EG`, `AE`, `OM`, `PK`, `SA`) | Payments ([Intention API](https://developers.paymob.com/paymob-docs/intention-apis/create-intention), Cards, Vodafone Cash, Fawry Kiosk, ValU), Payouts ([Paymob Send](https://developers.paymob.com/paymob-docs/beyond-payments/payouts)), Webhooks ([HMAC-SHA512](https://developers.paymob.com/paymob-docs/developers/webhook-callbacks-and-hmac/hmac/hmac-transaction-callback)) | [Paymob Developer Portal](https://developers.paymob.com/) |
+| **[`some-moyasar`](https://github.com/some-of-cs/some-moyasar)** | Saudi Arabia & GCC (`SA`, `KW`, `BH`, `QA`, `AE`) | Payments ([Payments](https://docs.moyasar.com/api/payments/01-create-payment) & [Payment Intents](https://docs.moyasar.com/guides/payment-intents/overview), Mada, STC Pay, SADAD, Apple Pay), Payouts ([SARIE & IPS](https://docs.moyasar.com/api/payouts/05-list-payouts)), Webhooks ([Constant-Time Secret Verifier](https://docs.moyasar.com/api/other/webhooks/webhook-reference)) | [Moyasar Online Docs](https://docs.moyasar.com/api/api-introduction) |
+| **Third-Party Gateways** | Global & Regional | Any custom provider (`some-tap`, `some-hyperpay`, `some-checkout`, `some-adyen`, etc.) via `some_payment_core::PaymentProvider` | Extensible via `some-payment-core` |
 
 ---
 
-## Architecture: Country Routing & Composable Capabilities
+## Planned Architecture (Modules 2–5)
 
-Instead of forcing every gateway into a lowest-common-denominator struct, `some-payment` separates **Routing Policies** from orthogonal **Capability Traits**:
+> [!NOTE]
+> The multi-provider orchestrator crate (`some-payment`), country/currency routing engine, distributed idempotency middleware, and unified webhook dispatcher described below are **Planned (Modules 2–5)** and are not yet published on `main`. Track detailed designs in [`docs/architecture/DECOMPOSITION_ROADMAP.md`](docs/architecture/DECOMPOSITION_ROADMAP.md).
 
 ```text
                                  ┌──────────────────────────────────────────┐
-                                 │         some_payment::PaymentHub         │
+                                 │    some_payment (Planned: Modules 2–5)   │
                                  │  (Thread-Safe Multi-Gateway Orchestrator)│
                                  └────────────────────┬─────────────────────┘
                                                       │
           ┌───────────────────────────────────────────┼───────────────────────────────────────────┐
           ▼                                           ▼                                           ▼
 ┌───────────────────────────────┐     ┌───────────────────────────────┐     ┌───────────────────────────────┐
-│   Country & Rule Router       │     │  Cross-Gateway Capability     │     │   Unified Webhook Ingress     │
-│                               │     │  Composer (Mix & Match)       │     │                               │
-│ • CountryCode::SA -> Moyasar  │     │ • KYC:      Stripe Identity   │     │ • /webhooks/stripe (SHA-256)  │
-│ • CountryCode::EG -> Paymob   │     │ • Payment:  Paymob / Moyasar  │     │ • /webhooks/paymob (SHA-512)  │
-│ • CountryCode::US -> Stripe   │     │ • Payout:   Paymob / Moyasar  │     │ • /webhooks/moyasar (Digest)  │
-│ • Fallback:       -> Stripe   │     │ • Refunds:  Smart Void/Refund │     │ • Emits UnifiedPaymentEvent   │
+│   Country & Rule Router       │     │  Idempotency & Capabilities   │     │   Unified Webhook Ingress     │
+│   (Planned — Module 2)        │     │  (Planned — Module 3)         │     │   (Planned — Modules 4–5)     │
+│ • SA -> some-moyasar          │     │ • Fail-closed capability gate │     │ • /webhooks/stripe (SHA-256)  │
+│ • EG -> some-paymob           │     │ • Distributed IdempotencyStore│     │ • /webhooks/paymob (SHA-512)  │
+│ • Default -> some-stripe      │     │ • Lock-retention on 5xx/408   │     │ • /webhooks/moyasar (Digest)  │
 └───────────────────────────────┘     └───────────────────────────────┘     └───────────────────────────────┘
-```
-
-### Orthogonal Capability Traits
-
-| Capability Trait | Responsibility | Implementing Providers |
-| :--- | :--- | :--- |
-| `PaymentCapability` | Create two-step checkout intents (`create_intent`), charge saved tokens (`charge_token`), capture, void, or refund (`refund_or_void`) | [`some-stripe`](https://github.com/some-of-cs/some-stripe), [`some-paymob`](https://github.com/some-of-cs/some-paymob), [`some-moyasar`](https://github.com/some-of-cs/some-moyasar) |
-| `KycCapability` | Create document/biometric verification sessions (`create_kyc_session`), inspect verification status (`get_kyc_report`) | [`some-stripe`](https://github.com/some-of-cs/some-stripe) (`Stripe Identity`), custom KYC providers |
-| `PayoutCapability` | Single & bulk outbound disbursements to bank IBANs, cards, or mobile wallets (`disburse`, `disburse_bulk`, `payout_status`) | [`some-paymob`](https://github.com/some-of-cs/some-paymob) ([Paymob Send](https://developers.paymob.com/paymob-docs/beyond-payments/payouts)), [`some-moyasar`](https://github.com/some-of-cs/some-moyasar) ([SARIE/IPS](https://docs.moyasar.com/api/payouts/05-list-payouts)), [`some-stripe`](https://github.com/some-of-cs/some-stripe) (`Connect Payouts`) |
-| `WebhookCapability` | Constant-time cryptographic verification and normalization into `UnifiedWebhookEvent` | [`some-stripe`](https://github.com/some-of-cs/some-stripe), [`some-paymob`](https://github.com/some-of-cs/some-paymob), [`some-moyasar`](https://github.com/some-of-cs/some-moyasar) |
-| `SplitSettlementCapability` | Multi-party marketplace split payments and platform commission deduction | [`some-moyasar`](https://github.com/some-of-cs/some-moyasar) ([Splits](https://docs.moyasar.com/api/payments/01-create-payment)), [`some-paymob`](https://github.com/some-of-cs/some-paymob) ([Split Features](https://developers.paymob.com/paymob-docs/payments-and-features/core-features/split-features)), [`some-stripe`](https://github.com/some-of-cs/some-stripe) (`Connect`) |
-
----
-
-## Installation & Feature Flags
-
-Select only the gateways your service needs:
-
-```toml
-[dependencies]
-some-payment = { version = "0.1.0", features = ["stripe", "paymob", "moyasar", "country-router", "composable-pipelines"] }
-tokio = { version = "1", features = ["full"] }
-```
-
-| Feature Flag | Default | Description |
-| :--- | :---: | :--- |
-| `stripe` | **Yes** | Enables [`some-stripe`](https://github.com/some-of-cs/some-stripe) adapter (Checkout, PaymentIntents, Identity KYC, Connect Payouts, Webhooks) |
-| `paymob` | **Yes** | Enables [`some-paymob`](https://github.com/some-of-cs/some-paymob) adapter ([Intention API](https://developers.paymob.com/paymob-docs/intention-apis/create-intention), Wallets, Kiosk, ValU, [Paymob Send Payouts](https://developers.paymob.com/paymob-docs/beyond-payments/payouts)) |
-| `moyasar` | **Yes** | Enables [`some-moyasar`](https://github.com/some-of-cs/some-moyasar) adapter ([Payments](https://docs.moyasar.com/api/payments/01-create-payment), [Payment Intents](https://docs.moyasar.com/guides/payment-intents/overview), Mada, STC Pay, [SARIE/IPS Payouts](https://docs.moyasar.com/api/payouts/05-list-payouts)) |
-| `country-router` | **Yes** | Dynamic ISO-3166-1 alpha-2 country, currency, and payment-method routing with automatic failover |
-| `composable-pipelines` | **Yes** | Cross-gateway workflow builder (e.g., Stripe KYC + Paymob/Moyasar Payment + Payouts) |
-
----
-
-## Quick Start
-
-### 1. Country-Based Dynamic Gateway Switching (Stripe + Paymob + Moyasar Simultaneously)
-
-Register all three gateways once at startup and let `PaymentHub` automatically route checkouts based on the customer's country (`SA` -> Moyasar, `EG` -> Paymob, default -> Stripe):
-
-```rust,no_run
-use some_payment::prelude::*;
-use some_stripe::StripeClient;
-use some_paymob::PaymobClient;
-use some_moyasar::{MoyasarClient, SecretKey as MoyasarSecretKey};
-
-#[tokio::main]
-async fn main() -> Result<(), PaymentHubError> {
-    // 1. Initialize individual gateway SDK clients
-    let stripe = StripeClient::new("sk_live_STRIPE_KEY");
-    let paymob = PaymobClient::new("egy_sk_live_PAYMOB_KEY")?;
-    let moyasar = MoyasarClient::builder(MoyasarSecretKey::new("sk_live_MOYASAR_KEY")?).build()?;
-
-    // 2. Build the unified PaymentHub with Country-Based Routing Rules
-    let hub = PaymentHub::builder()
-        .register_gateway(GatewayId::Stripe, stripe)
-        .register_gateway(GatewayId::Paymob, paymob)
-        .register_gateway(GatewayId::Moyasar, moyasar)
-        .routing_policy(
-            CountryRoutingPolicy::builder()
-                // Route Saudi Arabia & GCC to Moyasar (Mada, STC Pay, Apple Pay, SADAD)
-                .route_country(CountryCode::SA, GatewayId::Moyasar)
-                // Route Egypt to Paymob (Meza, Vodafone Cash, Fawry, ValU)
-                .route_country(CountryCode::EG, GatewayId::Paymob)
-                // Route UAE to Paymob with automatic fallback to Stripe
-                .route_country_with_fallback(CountryCode::AE, GatewayId::Paymob, vec![GatewayId::Stripe])
-                // Default all other countries (US, EU, GB, etc.) to Stripe
-                .default_gateway(GatewayId::Stripe)
-                .build(),
-        )
-        .build()?;
-
-    // 3. Dynamically routes to `some-moyasar` because buyer_country == CountryCode::SA
-    let sa_checkout = hub
-        .payments()
-        .create_intent(UnifiedIntentRequest {
-            buyer_country: CountryCode::SA,
-            amount_minor: 15_000, // 150.00 SAR (in halalas)
-            currency: CurrencyCode::SAR,
-            order_reference: "ORD-SA-9901".into(),
-            description: Some("Riyadh Express Delivery".into()),
-            callback_url: "https://api.example.com/payments/callback".into(),
-            customer_email: Some("customer@example.sa".into()),
-            customer_phone: Some("+966501234567".into()),
-        })
-        .await?;
-
-    println!(
-        "Routed via {:?} -> intent_id={}, client_secret={:?}",
-        sa_checkout.gateway, sa_checkout.intent_id, sa_checkout.client_secret
-    );
-    Ok(())
-}
-```
-
----
-
-### 2. Cross-Gateway Capability Composition (Stripe KYC + Paymob Payment + Payouts)
-
-Use `ComposablePipeline` to combine features from different gateways in a single strongly typed workflow—for example, enforcing **Stripe Identity KYC** before accepting a localized **Paymob** payment and disbursing vendor earnings via **Paymob Payouts** (or **Moyasar SARIE Payouts**):
-
-```rust,no_run
-use some_payment::prelude::*;
-
-async fn run_cross_gateway_marketplace_flow(hub: &PaymentHub) -> Result<(), PaymentHubError> {
-    // Compose capabilities from distinct gateways explicitly:
-    let pipeline = hub
-        .compose_pipeline()
-        .kyc_provider(GatewayId::Stripe)       // Use Stripe Identity for global passport/selfie KYC
-        .payment_provider(GatewayId::Paymob)   // Use Paymob Intention API for EGP checkout
-        .payout_provider(GatewayId::Paymob)    // Use Paymob Send for instant Vodafone Cash disbursement
-        .build()?;
-
-    // Step 1: Verify Seller/Buyer Identity via Stripe KYC (`some-stripe`)
-    let kyc_session = pipeline
-        .kyc()
-        .create_verification_session(KycSessionRequest {
-            user_id: "usr_egypt_992".into(),
-            document_types: vec![KycDocumentType::Passport, KycDocumentType::IdCard],
-            require_live_selfie: true,
-            return_url: "https://app.example.com/kyc/complete".into(),
-        })
-        .await?;
-
-    // Step 2: Gate Paymob Checkout on KYC Verification Status
-    if pipeline.kyc().is_verified(&kyc_session.session_id).await? {
-        let payment_intent = pipeline
-            .payment()
-            .create_intent(UnifiedIntentRequest {
-                buyer_country: CountryCode::EG,
-                amount_minor: 500_000, // 5,000.00 EGP
-                currency: CurrencyCode::EGP,
-                order_reference: "ORD-EG-KYC-501".into(),
-                description: Some("Verified Marketplace Escrow Order".into()),
-                callback_url: "https://api.example.com/webhooks/paymob".into(),
-                customer_email: Some("buyer@example.eg".into()),
-                customer_phone: Some("+201012345678".into()),
-            })
-            .await?;
-
-        println!("Paymob Checkout Ready (KYC Verified by Stripe): {}", payment_intent.checkout_url);
-    }
-
-    // Step 3: Disburse Seller Payout via Paymob Send (or switch dynamically to Moyasar SARIE for SA sellers)
-    let payout = pipeline
-        .payout()
-        .disburse(UnifiedPayoutRequest {
-            recipient_country: CountryCode::EG,
-            amount_minor: 425_000, // 4,250.00 EGP (after commission)
-            currency: CurrencyCode::EGP,
-            reference_id: "PAYOUT-SELLER-501".into(),
-            destination: UnifiedPayoutDestination::MobileWallet {
-                provider: WalletProvider::VodafoneCash,
-                mobile_number: "01012345678".into(),
-            },
-            purpose: PayoutPurposeCategory::MerchantSettlement,
-        })
-        .await?;
-
-    println!("Disbursed via {:?}: payout_id={}, status={:?}", payout.gateway, payout.payout_id, payout.status);
-    Ok(())
-}
-```
-
----
-
-### 3. Unified Multi-Gateway Webhook Dispatcher
-
-Normalize incoming webhooks from [Stripe](https://docs.stripe.com/api/events/types) (`Stripe-Signature` HMAC-SHA256), [Paymob](https://developers.paymob.com/paymob-docs/developers/webhook-callbacks-and-hmac/hmac/hmac-transaction-callback) (`hmac` query/body HMAC-SHA512), and [Moyasar](https://docs.moyasar.com/api/other/webhooks/webhook-reference) (`secret_token` constant-time digest) into a single `UnifiedWebhookEvent`:
-
-```rust,no_run
-use some_payment::prelude::*;
-use http::HeaderMap;
-
-fn handle_unified_webhook(
-    hub: &PaymentHub,
-    gateway: GatewayId,
-    headers: &HeaderMap,
-    query_string: Option<&str>,
-    raw_body: &[u8],
-) -> Result<(), PaymentHubError> {
-    // Verifies signature/secret in constant time using the target gateway's cryptographic verifier
-    let event = hub.webhooks().verify_and_normalize(gateway, headers, query_string, raw_body)?;
-
-    match event.kind {
-        UnifiedEventKind::PaymentSucceeded {
-            transaction_id,
-            order_reference,
-            amount_minor,
-            currency,
-        } => {
-            println!(
-                "[{:?}] Payment succeeded: tx={}, order={:?}, amount={} {}",
-                event.gateway, transaction_id, order_reference, amount_minor, currency
-            );
-        }
-        UnifiedEventKind::PaymentFailed { transaction_id, reason } => {
-            eprintln!("[{:?}] Payment failed: tx={}, reason={:?}", event.gateway, transaction_id, reason);
-        }
-        UnifiedEventKind::PayoutUpdated { payout_id, status } => {
-            println!("[{:?}] Payout {} transitioned to {:?}", event.gateway, payout_id, status);
-        }
-        UnifiedEventKind::KycStatusChanged { session_id, verified } => {
-            println!("[{:?}] KYC session {} verified={}", event.gateway, session_id, verified);
-        }
-        _ => {}
-    }
-    Ok(())
-}
-```
-
----
-
-## Adding Future Payment Gateways
-
-`some-payment` is designed with an open microkernel plugin boundary so third-party and upcoming first-party gateways (such as **Tap Payments**, **HyperPay**, **Checkout.com**, **Adyen**, **Tabby**, **Tamara**, or **PayPal**) can be registered without modifying core routing logic:
-
-```rust,no_run
-use async_trait::async_trait;
-use some_payment::traits::{GatewayMetadata, PaymentCapability, PayoutCapability, WebhookCapability};
-
-pub struct CustomGatewayAdapter;
-
-#[async_trait]
-impl PaymentCapability for CustomGatewayAdapter {
-    async fn create_intent(&self, req: UnifiedIntentRequest) -> Result<UnifiedIntentResponse, GatewayError> {
-        // Custom gateway protocol implementation
-        todo!()
-    }
-
-    async fn refund_or_void(&self, tx_id: &str, amount: Option<u64>) -> Result<UnifiedReversalResponse, GatewayError> {
-        todo!()
-    }
-}
 ```
 
 ---
 
 ## Backers & Corporate Sponsors
 
-`some-payment` (along with [`some-stripe`](https://github.com/some-of-cs/some-stripe), [`some-paymob`](https://github.com/some-of-cs/some-paymob), and [`some-moyasar`](https://github.com/some-of-cs/some-moyasar)) is an independent, community-driven open-source project. If your business relies on this crate to process transactions or verify webhooks, corporate sponsorship directly finances continuous maintenance, zero-day security updates, and upcoming module expansion.
+`some-payment` (along with [`some-stripe`](https://github.com/some-of-cs/some-stripe), [`some-paymob`](https://github.com/some-of-cs/some-paymob), and [`some-moyasar`](https://github.com/some-of-cs/some-moyasar)) is an independent, community-driven open-source project. If your business relies on this ecosystem to process transactions or verify webhooks, corporate sponsorship directly finances continuous maintenance, security updates, and upcoming module expansion.
 
 <div align="center">
 
@@ -344,20 +211,15 @@ impl PaymentCapability for CustomGatewayAdapter {
 
 ## Contributing
 
-We welcome community contributions! To ensure code quality and consistency:
+We welcome community contributions! Before opening a pull request, run the full workspace verification suite:
 
-1. Ensure all tests and doc-tests pass:
-   ```bash
-   cargo test
-   ```
-2. Ensure code compiles without warnings on the Rust 2024 edition:
-   ```bash
-   cargo clippy --all-targets -- -D warnings
-   ```
-3. Format all code according to standard `rustfmt`:
-   ```bash
-   cargo fmt --check
-   ```
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo test --doc --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+```
 
 ---
 
