@@ -216,7 +216,7 @@ mod tests {
     }
 
     impl MockProvider {
-        fn new(id: &str, capabilities: PaymentCapabilities) -> Arc<dyn PaymentProvider> {
+        fn arc(id: &str, capabilities: PaymentCapabilities) -> Arc<dyn PaymentProvider> {
             Arc::new(Self {
                 id: ProviderId::new(id),
                 capabilities,
@@ -275,14 +275,14 @@ mod tests {
     }
 
     fn test_registry() -> ProviderRegistry {
-        let stripe = MockProvider::new(
+        let stripe = MockProvider::arc(
             "stripe",
             PaymentCapabilities::DIRECT_PAYMENT
                 | PaymentCapabilities::HOSTED_CHECKOUT
                 | PaymentCapabilities::SPLITS,
         );
-        let moyasar = MockProvider::new("moyasar", PaymentCapabilities::DIRECT_PAYMENT);
-        let empty = MockProvider::new("minimal", PaymentCapabilities::empty());
+        let moyasar = MockProvider::arc("moyasar", PaymentCapabilities::DIRECT_PAYMENT);
+        let empty = MockProvider::arc("minimal", PaymentCapabilities::empty());
         let mut providers: HashMap<ProviderId, Arc<dyn PaymentProvider>> = HashMap::new();
         for provider in [stripe, moyasar, empty] {
             let id = provider.id().clone();
@@ -404,11 +404,11 @@ mod tests {
 
     #[test]
     fn builder_with_routing_policy_installs_route_resolver_and_builds() {
-        let stripe = MockProvider::new(
+        let stripe = MockProvider::arc(
             "stripe",
             PaymentCapabilities::DIRECT_PAYMENT | PaymentCapabilities::HOSTED_CHECKOUT,
         );
-        let moyasar = MockProvider::new("moyasar", PaymentCapabilities::DIRECT_PAYMENT);
+        let moyasar = MockProvider::arc("moyasar", PaymentCapabilities::DIRECT_PAYMENT);
         let policy: Arc<dyn RoutingPolicy> = Arc::new(FixedPolicy {
             target: ProviderId::new("moyasar"),
         });

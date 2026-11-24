@@ -316,7 +316,7 @@ mod tests {
     }
 
     impl StubProvider {
-        fn new(slug: &str, capabilities: PaymentCapabilities) -> Arc<dyn PaymentProvider> {
+        fn arc(slug: &str, capabilities: PaymentCapabilities) -> Arc<dyn PaymentProvider> {
             Arc::new(Self {
                 id: ProviderId::new(slug),
                 capabilities,
@@ -371,9 +371,9 @@ mod tests {
         let core_caps = PaymentCapabilities::DIRECT_PAYMENT | PaymentCapabilities::HOSTED_CHECKOUT;
         build_registry(
             vec![
-                StubProvider::new("stripe", core_caps | PaymentCapabilities::SPLITS),
-                StubProvider::new("moyasar", core_caps),
-                StubProvider::new("paymob", core_caps),
+                StubProvider::arc("stripe", core_caps | PaymentCapabilities::SPLITS),
+                StubProvider::arc("moyasar", core_caps),
+                StubProvider::arc("paymob", core_caps),
             ],
             "stripe",
         )
@@ -478,8 +478,8 @@ mod tests {
     fn regional_router_falls_back_to_registry_default_when_international_incapable() {
         let registry = build_registry(
             vec![
-                StubProvider::new("moyasar", PaymentCapabilities::DIRECT_PAYMENT),
-                StubProvider::new("paymob", PaymentCapabilities::DIRECT_PAYMENT),
+                StubProvider::arc("moyasar", PaymentCapabilities::DIRECT_PAYMENT),
+                StubProvider::arc("paymob", PaymentCapabilities::DIRECT_PAYMENT),
             ],
             "paymob",
         );

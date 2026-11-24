@@ -379,7 +379,7 @@ mod tests {
     }
 
     impl MockProvider {
-        fn new(id: &str, capabilities: PaymentCapabilities) -> Arc<dyn PaymentProvider> {
+        fn arc(id: &str, capabilities: PaymentCapabilities) -> Arc<dyn PaymentProvider> {
             Arc::new(Self {
                 id: ProviderId::new(id),
                 capabilities,
@@ -461,14 +461,14 @@ mod tests {
     fn multi_provider_registry() -> TestRegistry {
         TestRegistry::new(
             vec![
-                MockProvider::new(
+                MockProvider::arc(
                     "stripe",
                     PaymentCapabilities::DIRECT_PAYMENT
                         | PaymentCapabilities::AUTH_CAPTURE
                         | PaymentCapabilities::VOID_AUTHORIZED,
                 ),
-                MockProvider::new("paymob", PaymentCapabilities::HOSTED_CHECKOUT),
-                MockProvider::new("moyasar", PaymentCapabilities::REFUND),
+                MockProvider::arc("paymob", PaymentCapabilities::HOSTED_CHECKOUT),
+                MockProvider::arc("moyasar", PaymentCapabilities::REFUND),
             ],
             "stripe",
         )
@@ -630,7 +630,7 @@ mod tests {
 
         // TM-6: swapped runtime registry missing the pinned provider fails closed.
         let narrowed_registry = TestRegistry::new(
-            vec![MockProvider::new(
+            vec![MockProvider::arc(
                 "stripe",
                 PaymentCapabilities::DIRECT_PAYMENT,
             )],
