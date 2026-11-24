@@ -6,8 +6,8 @@
 //! `some-tap`, etc.) can implement [`PaymentProvider`] without depending on the
 //! `some-payment` orchestrator crate.
 
-#![deny(unsafe_code)]
-#![warn(missing_docs)]
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 pub mod capabilities;
 pub mod error;
